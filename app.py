@@ -129,6 +129,7 @@ def load_stock_names():
         expected_columns = ["Code", "Name", "Market"]
         if list(df.columns) != expected_columns:
             logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
+            logger.error(f"實際欄位: {list(df.columns)}")
             return {}
         stock_names = {}
         for _, row in df.iterrows():
@@ -382,6 +383,7 @@ def fetch_stock_name():
     code = request.form.get("code", "").strip()
     market = request.form.get("market", "TWSE")
     logger.info(f"收到查詢請求: 代碼={code}, 市場={market}")
+    
     if not code:
         response = jsonify({"error": "請輸入股票代碼"})
         response.headers["Content-Type"] = "application/json; charset=utf-8"
@@ -389,20 +391,51 @@ def fetch_stock_name():
     
     # 直接從本地 CSV 獲取股票名稱
     stock_names = load_stock_names()
-    name_key = (str(code), market)
+    
+    # 根據市場選擇正確的鍵
+    if market == "TWO":
+        market_key = "TWO"
+    else:
+        market_key = "TWSE"
+    
+    name_key = (str(code), market_key)
+    logger.info(f"查找的鍵: {name_key}")
+    
+    # 記錄所有可用的鍵以便調試
+    available_keys = list(stock_names.keys())
+    logger.info(f"可用的鍵數量: {len(available_keys)}")
+    if available_keys:
+        logger.info(f"前幾個可用鍵: {available_keys[:5]}")
+    
     name = stock_names.get(name_key, "")
     
     if not name:
-        logger.error(f"無法找到股票 {code} 的名稱")
-        response = jsonify({"error": f"無法找到股票 {code} 的名稱，請手動輸入名稱"})
-        response.headers["Content-Type"] = "application/json; charset=utf-8"
-        return response
+        # 嘗試不區分市場查找
+        for key, value in stock_names.items():
+            if key[0] == str(code):
+                name = value
+                logger.info(f"找到不區分市場的名稱: {name}")
+                break
+        
+        if not name:
+            logger.error(f"無法找到股票 {code} 的名稱，查找的鍵: {name_key}")
+            # 嘗試從 Google Sheets 獲取名稱
+            try:
+                if hasattr(fetch_stock_info, 'google_sheets_prices'):
+                    # 假設 Google Sheets 中有名稱數據
+                    # 這裡需要根據您的實際數據結構進行調整
+                    pass
+            except:
+                pass
+            
+            response = jsonify({"error": f"無法找到股票 {code} 的名稱，請手動輸入名稱"})
+            response.headers["Content-Type"] = "application/json; charset=utf-8"
+            return response
     
     logger.info(f"返回股票名稱: {name}")
     response = jsonify({"name": name, "is_english": not re.search(r'[\u4e00-\u9fff]', name)})
-    response.headers["Content-Type": "application/json; charset=utf-8"]
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
-
 @app.route("/export_transactions")
 def export_transactions():
     try:
