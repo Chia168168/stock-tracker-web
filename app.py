@@ -2,10 +2,15 @@ from flask import Flask, render_template, request, redirect, url_for, send_file,
 import pandas as pd
 import yfinance as yf
 import os
-from datetime import datetime
+from datetime import datetime, time
 import re
 import io
 import logging
+import json
+import gspread
+from google.oauth2.service_account import Credentials
+import threading
+import time
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")  # 使用環境變數
@@ -18,6 +23,84 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRANSACTION_FILE = os.path.join(BASE_DIR, "stock_transactions.csv")
 STOCK_NAMES_FILE = os.path.join(BASE_DIR, "stock_names.csv")
+
+# Google Sheets 設置
+def setup_google_sheets():
+    try:
+        # 從環境變量獲取憑證（在 Render 上設置）
+        creds_json = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
+        if not creds_json:
+            logger.error("未找到 Google Sheets 憑證環境變量")
+            return None
+        
+        # 解析憑證
+        scope = ['https://spreadsheets.google.com/feeds', 
+                'https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_info(
+            json.loads(creds_json), scopes=scope)
+        
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        logger.error(f"設置 Google Sheets 時出錯: {e}")
+        return None
+
+# 從 Google Sheets 讀取股票價格
+def get_prices_from_google_sheet(client, sheet_name, worksheet_name="Sheet1"):
+    try:
+        # 打開試算表
+        sheet = client.open(sheet_name).worksheet(worksheet_name)
+        
+        # 讀取所有數據
+        data = sheet.get_all_records()
+        
+        # 轉換為字典格式：{股票代碼: 價格}
+        prices = {}
+        for row in data:
+            if 'code' in row and 'price' in row:
+                prices[str(row['code'])] = float(row['price'])
+        
+        return prices
+    except Exception as e:
+        logger.error(f"從 Google Sheets 讀取數據時出錯: {e}")
+        return {}
+
+# 在應用啟動時初始化 Google Sheets 連接
+def init_google_sheets():
+    try:
+        client = setup_google_sheets()
+        if client:
+            # 從環境變量獲取試算表名稱
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票價格')
+            worksheet_name = os.environ.get('GOOGLE_WORKSHEET_NAME', 'Sheet1')
+            
+            # 讀取價格數據
+            prices = get_prices_from_google_sheet(client, sheet_name, worksheet_name)
+            
+            # 將價格數據存儲在函數屬性中
+            fetch_stock_info.google_sheets_prices = prices
+            logger.info(f"從 Google Sheets 成功讀取 {len(prices)} 個股票價格")
+        else:
+            logger.warning("無法初始化 Google Sheets 連接")
+            fetch_stock_info.google_sheets_prices = {}
+    except Exception as e:
+        logger.error(f"初始化 Google Sheets 時出錯: {e}")
+        fetch_stock_info.google_sheets_prices = {}
+
+# 定期更新 Google Sheets 數據
+def schedule_google_sheets_update(interval_minutes=15):
+    def update():
+        while True:
+            try:
+                time.sleep(interval_minutes * 60)
+                init_google_sheets()
+            except Exception as e:
+                logger.error(f"定期更新 Google Sheets 數據時出錯: {e}")
+    
+    # 啟動後台線程
+    thread = threading.Thread(target=update)
+    thread.daemon = True
+    thread.start()
 
 # Initialize CSV file for transactions if it doesn't exist
 def initialize_csv():
@@ -63,14 +146,7 @@ def load_stock_names():
         logger.error(f"載入 {STOCK_NAMES_FILE} 失敗: {e}")
         return {}
 
-# Fetch stock info (price and name) using yfinance with retry
-# Fetch stock info (price and name) using yfinance with retry and caching
-# Fetch stock info (price and name) using yfinance with retry and caching
-import requests
-from datetime import datetime, time
-
-# Fetch stock info using Taiwan Stock Exchange and OTC APIs
-# Fetch stock info using Taiwan Stock Exchange and OTC APIs with fallback to Yahoo Finance
+# Fetch stock info - 使用 Google Sheets 數據
 def fetch_stock_info(code, is_otc=False):
     # 使用緩存來減少 API 請求
     cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
@@ -88,66 +164,21 @@ def fetch_stock_info(code, is_otc=False):
     name_key = (str(code), "TWO" if is_otc else "TWSE")
     name = stock_names.get(name_key, "未知名稱")
     
+    # 嘗試從 Google Sheets 獲取價格
     price = 0
+    if hasattr(fetch_stock_info, 'google_sheets_prices'):
+        price = fetch_stock_info.google_sheets_prices.get(str(code), 0)
     
-    try:
-        # 首先嘗試從 Yahoo Finance 獲取價格（無論是否交易時間）
+    # 如果 Google Sheets 沒有數據，嘗試從 Yahoo Finance 獲取
+    if price == 0:
         try:
             ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
             stock = yf.Ticker(ticker)
-            
-            # 嘗試獲取最新價格
-            try:
-                info = stock.info
-                if 'currentPrice' in info and info['currentPrice']:
-                    price = info['currentPrice']
-                elif 'regularMarketPrice' in info and info['regularMarketPrice']:
-                    price = info['regularMarketPrice']
-            except:
-                pass
-                
-            # 如果無法獲取最新價格，嘗試獲取歷史收盤價
-            if price == 0:
-                try:
-                    history = stock.history(period="5d")  # 獲取最近5天的數據
-                    if not history.empty:
-                        price = history["Close"].iloc[-1]  # 獲取最後一天的收盤價
-                except:
-                    pass
+            history = stock.history(period="1d")
+            if not history.empty:
+                price = history["Close"].iloc[-1]
         except Exception as e:
-            logger.error(f"從Yahoo Finance獲取股票 {ticker} 價格失敗: {e}")
-        
-        # 如果 Yahoo Finance 失敗，嘗試台灣官方 API
-        if price == 0:
-            # 檢查是否在交易時間內（台灣時間 9:00-13:30）
-            try:
-                now_utc = datetime.utcnow()
-                # 轉換為台灣時間 (UTC+8)
-                now_tw = now_utc.replace(hour=now_utc.hour + 8)
-                if now_tw.hour > 24:
-                    now_tw = now_tw.replace(day=now_tw.day + 1, hour=now_tw.hour - 24)
-                
-                # 檢查是否為工作日（週一至週五）
-                is_weekday = now_tw.weekday() < 5
-                
-                # 檢查是否在交易時間內（9:00-13:30）
-                market_open = time(9, 0)
-                market_close = time(13, 30)
-                is_market_hours = market_open <= now_tw.time() <= market_close
-                
-                if is_weekday and is_market_hours:
-                    # 在交易時間內，嘗試從台灣官方 API 獲取實時價格
-                    if is_otc:
-                        # 上櫃股票
-                        price = get_otc_stock_price(code)
-                    else:
-                        # 上市股票
-                        price = get_twse_stock_price(code)
-            except Exception as e:
-                logger.error(f"檢查交易時間時出錯: {e}")
-    except Exception as e:
-        logger.error(f"獲取股票價格時出錯: {e}")
-        price = 0
+            logger.error(f"從 Yahoo Finance 獲取股票 {ticker} 價格失敗: {e}")
     
     result = {"price": round(price, 2), "name": name}
     
@@ -161,81 +192,6 @@ def fetch_stock_info(code, is_otc=False):
     
     return result
 
-# 從台灣證交所獲取上市股票價格
-def get_twse_stock_price(code):
-    try:
-        # 使用新的證交所 API
-        today = datetime.now().strftime("%Y%m%d")
-        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={today}&stockNo={code}"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if data['stat'] == 'OK' and data['data']:
-            # 獲取最新交易日的數據
-            latest_data = data['data'][-1]
-            # 收盤價通常在索引 6
-            if len(latest_data) > 6 and latest_data[6]:
-                return float(latest_data[6].replace(',', ''))
-    except Exception as e:
-        logger.error(f"從證交所獲取股票 {code} 價格失敗: {e}")
-    
-    return 0
-
-# 從櫃買中心獲取上櫃股票價格
-def get_otc_stock_price(code):
-    try:
-        # 使用新的櫃買中心 API
-        today = datetime.now().strftime("%Y/%m/%d")
-        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&d={today}&stkno={code}"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if data['aaData']:
-            # 獲取最新交易日的數據
-            latest_data = data['aaData'][0]
-            # 收盤價通常在索引 6
-            if len(latest_data) > 6 and latest_data[6]:
-                return float(latest_data[6].replace(',', ''))
-    except Exception as e:
-        logger.error(f"從櫃買中心獲取股票 {code} 價格失敗: {e}")
-    
-    return 0
-
-# 從台灣證交所獲取上市股票價格
-def get_twse_stock_price(code):
-    try:
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{code}.tw&json=1&delay=0"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if data['msgArray']:
-            stock_info = data['msgArray'][0]
-            if 'z' in stock_info and stock_info['z']:
-                return float(stock_info['z'])
-    except Exception as e:
-        logger.error(f"從證交所獲取股票 {code} 價格失敗: {e}")
-    
-    return 0
-
-# 從櫃買中心獲取上櫃股票價格
-def get_otc_stock_price(code):
-    try:
-        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&d=20250905&stkno={code}"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if data['aaData']:
-            # 獲取最新交易日的數據
-            latest_data = data['aaData'][0]
-            # 收盤價通常在索引 6
-            if len(latest_data) > 6 and latest_data[6]:
-                return float(latest_data[6].replace(',', ''))
-    except Exception as e:
-        logger.error(f"從櫃買中心獲取股票 {code} 價格失敗: {e}")
-    
-    return 0
-
-# Calculate portfolio summary
 # Calculate portfolio summary
 def get_portfolio_summary():
     try:
@@ -274,23 +230,10 @@ def get_portfolio_summary():
     total_unrealized_profit = 0
     total_realized_profit = 0
 
-    # 批量獲取股票信息，減少 API 調用
-    stock_codes_to_fetch = []
-    for code, data in summary.items():
-        if data["quantity"] > 0:
-            stock_codes_to_fetch.append((code.split(".")[0], data["is_otc"]))
-    
-    # 預先獲取所有需要的股票信息
-    stock_info_cache = {}
-    for code, is_otc in stock_codes_to_fetch:
-        stock_info_cache[(code, is_otc)] = fetch_stock_info(code, is_otc)
-
     for code, data in summary.items():
         if data["quantity"] <= 0:
             continue
-        
-        base_code = code.split(".")[0]
-        stock_info = stock_info_cache.get((base_code, data["is_otc"]), {"price": 0, "name": data["name"]})
+        stock_info = fetch_stock_info(code.split(".")[0], data["is_otc"])
         current_price = stock_info["price"]
         market_value = data["quantity"] * current_price
         avg_buy_price = data["total_cost"] / data["buy_quantity"] if data["buy_quantity"] > 0 else 0
@@ -303,7 +246,7 @@ def get_portfolio_summary():
 
         result.append({
             "Stock_Code": code,
-            "Stock_Name": stock_info["name"] or data["name"],
+            "Stock_Name": data["name"],
             "Quantity": int(data["quantity"]),
             "Avg_Buy_Price": round(avg_buy_price, 2),
             "Current_Price": round(current_price, 2),
@@ -314,6 +257,7 @@ def get_portfolio_summary():
         })
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_csv()
@@ -394,6 +338,24 @@ def index():
             else:
                 error = "請選擇有效的 CSV 檔案"
 
+        elif action == "update_prices":
+            # 手動更新價格
+            for key, value in request.form.items():
+                if key.startswith("price_"):
+                    stock_code = key.replace("price_", "")
+                    try:
+                        new_price = float(value)
+                        if new_price > 0:
+                            # 更新緩存中的價格
+                            if hasattr(fetch_stock_info, 'cache'):
+                                for cache_key in list(fetch_stock_info.cache.keys()):
+                                    if stock_code in cache_key:
+                                        fetch_stock_info.cache[cache_key]['data']['price'] = new_price
+                                        fetch_stock_info.cache[cache_key]['timestamp'] = datetime.now().timestamp()
+                                        flash(f"已更新 {stock_code} 的價格為 {new_price}", "success")
+                    except ValueError:
+                        pass
+
     try:
         transactions = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig').to_dict("records")
     except:
@@ -424,16 +386,21 @@ def fetch_stock_name():
         response = jsonify({"error": "請輸入股票代碼"})
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
-    is_otc = market == "TWO"
-    stock_info = fetch_stock_info(code, is_otc)
-    if not stock_info["name"]:
-        logger.error(f"無法抓取股票 {code} 的名稱")
-        response = jsonify({"error": f"無法抓取股票 {code} 的名稱，請檢查代碼或市場選擇，或手動輸入名稱"})
+    
+    # 直接從本地 CSV 獲取股票名稱
+    stock_names = load_stock_names()
+    name_key = (str(code), market)
+    name = stock_names.get(name_key, "")
+    
+    if not name:
+        logger.error(f"無法找到股票 {code} 的名稱")
+        response = jsonify({"error": f"無法找到股票 {code} 的名稱，請手動輸入名稱"})
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
-    logger.info(f"返回股票名稱: {stock_info['name']}")
-    response = jsonify({"name": stock_info["name"], "is_english": not re.search(r'[\u4e00-\u9fff]', stock_info["name"])})
-    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    
+    logger.info(f"返回股票名稱: {name}")
+    response = jsonify({"name": name, "is_english": not re.search(r'[\u4e00-\u9fff]', name)})
+    response.headers["Content-Type": "application/json; charset=utf-8"]
     return response
 
 @app.route("/export_transactions")
@@ -452,6 +419,11 @@ def export_transactions():
     except Exception as e:
         flash(f"匯出失敗: {e}", "error")
         return redirect(url_for("index"))
+
+# 初始化 Google Sheets
+init_google_sheets()
+# 啟動定期更新
+schedule_google_sheets_update(15)  # 每15分鐘更新一次
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
