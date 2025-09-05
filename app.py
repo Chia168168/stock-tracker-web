@@ -65,6 +65,7 @@ def load_stock_names():
 
 # Fetch stock info (price and name) using yfinance with retry
 # Fetch stock info (price and name) using yfinance with retry and caching
+# Fetch stock info (price and name) using yfinance with retry and caching
 def fetch_stock_info(code, is_otc=False, retries=2):
     # 使用緩存來減少 API 請求
     cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
@@ -81,58 +82,85 @@ def fetch_stock_info(code, is_otc=False, retries=2):
     ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
     stock_names = load_stock_names()
     
+    # 優先從本地 CSV 獲取股票名稱
+    name_key = (str(code), "TWO" if is_otc else "TWSE")
+    name = stock_names.get(name_key, "")
+    
+    # 嘗試獲取價格數據
+    price = 0
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
-            # 只獲取必要的價格信息，減少 API 負擔
-            history = stock.history(period="1d")
-            if not history.empty:
-                price = history["Close"].iloc[-1]
-            else:
-                price = 0
             
-            # 優先從本地 CSV 獲取股票名稱
-            name_key = (str(code), "TWO" if is_otc else "TWSE")
-            name = stock_names.get(name_key, "")
-            
-            if not name:
-                # 如果本地沒有，再嘗試從 API 獲取
-                info = stock.info
-                long_name = info.get("longName", "")
-                short_name = info.get("shortName", "")
-                name = long_name or short_name or ""
+            # 嘗試多種方法獲取價格
+            try:
+                # 方法1: 使用歷史數據
+                history = stock.history(period="1d")
+                if not history.empty:
+                    price = history["Close"].iloc[-1]
+                    break
+            except:
+                pass
                 
-                # 後備名稱映射
-                fallback_mapping = {
-                    "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
-                    "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
-                    "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
-                    "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
-                    # 可以添加更多映射...
-                }
-                name = fallback_mapping.get(name, name)
-            
-            result = {"price": round(price, 2), "name": name or "未知名稱"}
-            
-            # 更新緩存
-            if not hasattr(fetch_stock_info, 'cache'):
-                fetch_stock_info.cache = {}
-            fetch_stock_info.cache[cache_key] = {
-                'timestamp': current_time,
-                'data': result
-            }
-            
-            return result
+            try:
+                # 方法2: 使用快速信息
+                info = stock.fast_info
+                if hasattr(info, 'last_price') and info.last_price:
+                    price = info.last_price
+                    break
+            except:
+                pass
+                
+            try:
+                # 方法3: 使用詳細信息
+                info = stock.info
+                if 'currentPrice' in info and info['currentPrice']:
+                    price = info['currentPrice']
+                    break
+                elif 'regularMarketPrice' in info and info['regularMarketPrice']:
+                    price = info['regularMarketPrice']
+                    break
+            except:
+                pass
+                
         except Exception as e:
             logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
             # 等待一段時間再重試
             import time
             time.sleep(1)
     
-    # 如果所有嘗試都失敗，返回默認值
-    name_key = (str(code), "TWO" if is_otc else "TWSE")
-    name = stock_names.get(name_key, "未知名稱")
-    return {"price": 0, "name": name}
+    # 如果沒有獲取到名稱，嘗試從 API 獲取
+    if not name:
+        try:
+            info = stock.info
+            long_name = info.get("longName", "")
+            short_name = info.get("shortName", "")
+            name = long_name or short_name or ""
+            
+            # 後備名稱映射
+            fallback_mapping = {
+                "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
+                "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
+                "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
+                "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
+                # 可以添加更多映射...
+            }
+            name = fallback_mapping.get(name, name)
+        except:
+            name = "未知名稱"
+    
+    result = {"price": round(price, 2), "name": name}
+    
+    # 只有當獲取到有效數據時才更新緩存
+    if price > 0 or name != "未知名稱":
+        if not hasattr(fetch_stock_info, 'cache'):
+            fetch_stock_info.cache = {}
+        fetch_stock_info.cache[cache_key] = {
+            'timestamp': current_time,
+            'data': result
+        }
+    
+    return result
 # Calculate portfolio summary
 # Calculate portfolio summary
 def get_portfolio_summary():
