@@ -51,16 +51,22 @@ def fetch_stock_info(code, is_otc=False, retries=3):
     ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
     name_key = (str(code), "TWO" if is_otc else "TWSE")
     name = stock_names.get(name_key, "未知名稱")
-    try:
-        import twstock  # 動態載入 twstock
-        stock = twstock.Stock(code)
-        price = stock.fetch(2025, 9)[-1].close
-        logger.info(f"股票 {ticker} 股價: {price}")
-        return {"price": round(price, 2), "name": name}
-    except Exception as e:
-        logger.error(f"抓取股票 {ticker} 的資訊失敗: {e}")
-        return {"price": 0, "name": name}
-
+    for attempt in range(retries):
+        try:
+            import twstock
+            stock = twstock.Stock(code)
+            data = stock.fetch(2025, 9)
+            if not data:  # 檢查資料是否為空
+                logger.error(f"股票 {ticker} 無資料")
+                return {"price": 0, "name": name}
+            price = data[-1].close
+            logger.info(f"股票 {ticker} 股價: {price}")
+            return {"price": round(price, 2), "name": name}
+        except Exception as e:
+            logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
+            if attempt + 1 == retries:
+                return {"price": 0, "name": name}
+    return {"price": 0, "name": name}
 # Calculate portfolio summary
 def get_portfolio_summary():
     df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
