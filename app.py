@@ -70,6 +70,7 @@ import requests
 from datetime import datetime, time
 
 # Fetch stock info using Taiwan Stock Exchange and OTC APIs
+# Fetch stock info using Taiwan Stock Exchange and OTC APIs with fallback to Yahoo Finance
 def fetch_stock_info(code, is_otc=False):
     # 使用緩存來減少 API 請求
     cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
@@ -89,41 +90,61 @@ def fetch_stock_info(code, is_otc=False):
     
     price = 0
     
-    # 檢查是否在交易時間內（台灣時間 9:00-13:30）
     try:
-        now_utc = datetime.utcnow()
-        # 轉換為台灣時間 (UTC+8)
-        now_tw = now_utc.replace(hour=now_utc.hour + 8)
-        if now_tw.hour > 24:
-            now_tw = now_tw.replace(day=now_tw.day + 1, hour=now_tw.hour - 24)
-        
-        # 檢查是否為工作日（週一至週五）
-        is_weekday = now_tw.weekday() < 5
-        
-        # 檢查是否在交易時間內（9:00-13:30）
-        market_open = time(9, 0)
-        market_close = time(13, 30)
-        is_market_hours = market_open <= now_tw.time() <= market_close
-        
-        if is_weekday and is_market_hours:
-            # 在交易時間內，嘗試從台灣官方 API 獲取實時價格
-            if is_otc:
-                # 上櫃股票
-                price = get_otc_stock_price(code)
-            else:
-                # 上市股票
-                price = get_twse_stock_price(code)
-        else:
-            # 非交易時間，嘗試從 Yahoo Finance 獲取收盤價
+        # 首先嘗試從 Yahoo Finance 獲取價格（無論是否交易時間）
+        try:
+            ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
+            stock = yf.Ticker(ticker)
+            
+            # 嘗試獲取最新價格
             try:
-                ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
-                stock = yf.Ticker(ticker)
-                history = stock.history(period="1d")
-                if not history.empty:
-                    price = history["Close"].iloc[-1]
+                info = stock.info
+                if 'currentPrice' in info and info['currentPrice']:
+                    price = info['currentPrice']
+                elif 'regularMarketPrice' in info and info['regularMarketPrice']:
+                    price = info['regularMarketPrice']
             except:
-                # 如果 Yahoo Finance 也失敗，使用 0
-                price = 0
+                pass
+                
+            # 如果無法獲取最新價格，嘗試獲取歷史收盤價
+            if price == 0:
+                try:
+                    history = stock.history(period="5d")  # 獲取最近5天的數據
+                    if not history.empty:
+                        price = history["Close"].iloc[-1]  # 獲取最後一天的收盤價
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"從Yahoo Finance獲取股票 {ticker} 價格失敗: {e}")
+        
+        # 如果 Yahoo Finance 失敗，嘗試台灣官方 API
+        if price == 0:
+            # 檢查是否在交易時間內（台灣時間 9:00-13:30）
+            try:
+                now_utc = datetime.utcnow()
+                # 轉換為台灣時間 (UTC+8)
+                now_tw = now_utc.replace(hour=now_utc.hour + 8)
+                if now_tw.hour > 24:
+                    now_tw = now_tw.replace(day=now_tw.day + 1, hour=now_tw.hour - 24)
+                
+                # 檢查是否為工作日（週一至週五）
+                is_weekday = now_tw.weekday() < 5
+                
+                # 檢查是否在交易時間內（9:00-13:30）
+                market_open = time(9, 0)
+                market_close = time(13, 30)
+                is_market_hours = market_open <= now_tw.time() <= market_close
+                
+                if is_weekday and is_market_hours:
+                    # 在交易時間內，嘗試從台灣官方 API 獲取實時價格
+                    if is_otc:
+                        # 上櫃股票
+                        price = get_otc_stock_price(code)
+                    else:
+                        # 上市股票
+                        price = get_twse_stock_price(code)
+            except Exception as e:
+                logger.error(f"檢查交易時間時出錯: {e}")
     except Exception as e:
         logger.error(f"獲取股票價格時出錯: {e}")
         price = 0
@@ -139,6 +160,46 @@ def fetch_stock_info(code, is_otc=False):
     }
     
     return result
+
+# 從台灣證交所獲取上市股票價格
+def get_twse_stock_price(code):
+    try:
+        # 使用新的證交所 API
+        today = datetime.now().strftime("%Y%m%d")
+        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={today}&stockNo={code}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['stat'] == 'OK' and data['data']:
+            # 獲取最新交易日的數據
+            latest_data = data['data'][-1]
+            # 收盤價通常在索引 6
+            if len(latest_data) > 6 and latest_data[6]:
+                return float(latest_data[6].replace(',', ''))
+    except Exception as e:
+        logger.error(f"從證交所獲取股票 {code} 價格失敗: {e}")
+    
+    return 0
+
+# 從櫃買中心獲取上櫃股票價格
+def get_otc_stock_price(code):
+    try:
+        # 使用新的櫃買中心 API
+        today = datetime.now().strftime("%Y/%m/%d")
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&d={today}&stkno={code}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['aaData']:
+            # 獲取最新交易日的數據
+            latest_data = data['aaData'][0]
+            # 收盤價通常在索引 6
+            if len(latest_data) > 6 and latest_data[6]:
+                return float(latest_data[6].replace(',', ''))
+    except Exception as e:
+        logger.error(f"從櫃買中心獲取股票 {code} 價格失敗: {e}")
+    
+    return 0
 
 # 從台灣證交所獲取上市股票價格
 def get_twse_stock_price(code):

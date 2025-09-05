@@ -3,4 +3,5 @@
 echo "啟動股票投資管理應用..."
 # 設置台灣時區
 export TZ=Asia/Taipei
-gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120
+# 設置更長的超時時間
+gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 120 --preload
