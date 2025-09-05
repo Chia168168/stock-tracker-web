@@ -28,34 +28,17 @@ def initialize_csv():
         df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
 
 # Load stock names from CSV with encoding fallback
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
 def load_stock_names():
     try:
-        if not os.path.exists(STOCK_NAMES_FILE):
-            logger.warning(f"{STOCK_NAMES_FILE} 不存在，使用空映射")
-            return {}
-        try:
-            df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
-        except UnicodeDecodeError:
-            logger.warning("無法以 utf-8-sig 編碼讀取 stock_names.csv，嘗試 big5")
-            try:
-                df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
-            except UnicodeDecodeError:
-                logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
-                return {}
+        df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
         expected_columns = ["Code", "Name", "Market"]
         if list(df.columns) != expected_columns:
             logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
             return {}
-        stock_names = {}
-        for _, row in df.iterrows():
-            try:
-                code = str(row["Code"])
-                market = row["Market"]
-                name = row["Name"]
-                stock_names[(code, market)] = name
-                logger.debug(f"股票映射: 代碼={code}, 市場={market}, 名稱={name}")
-            except Exception as e:
-                logger.warning(f"跳過無效行: {row.to_dict()}, 錯誤: {e}")
+        stock_names = {(str(row["Code"]), row["Market"]): row["Name"] for _, row in df.iterrows()}
         logger.info(f"成功載入 {len(stock_names)} 個股票名稱")
         return stock_names
     except Exception as e:
@@ -68,17 +51,15 @@ def fetch_stock_info(code, is_otc=False, retries=3):
     ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
     name_key = (str(code), "TWO" if is_otc else "TWSE")
     name = stock_names.get(name_key, "未知名稱")
-    for attempt in range(retries):
-        try:
-            stock = twstock.Stock(code)
-            price = stock.fetch(2025, 9)[-1].close  # 獲取最新收盤價
-            logger.info(f"股票 {ticker} 股價: {price}")
-            return {"price": round(price, 2), "name": name}
-        except Exception as e:
-            logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
-            if attempt + 1 == retries:
-                return {"price": 0, "name": name}
-    return {"price": 0, "name": name}
+    try:
+        import twstock  # 動態載入 twstock
+        stock = twstock.Stock(code)
+        price = stock.fetch(2025, 9)[-1].close
+        logger.info(f"股票 {ticker} 股價: {price}")
+        return {"price": round(price, 2), "name": name}
+    except Exception as e:
+        logger.error(f"抓取股票 {ticker} 的資訊失敗: {e}")
+        return {"price": 0, "name": name}
 
 # Calculate portfolio summary
 def get_portfolio_summary():
