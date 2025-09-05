@@ -64,54 +64,76 @@ def load_stock_names():
         return {}
 
 # Fetch stock info (price and name) using yfinance with retry
-def fetch_stock_info(code, is_otc=False, retries=3):
+# Fetch stock info (price and name) using yfinance with retry and caching
+def fetch_stock_info(code, is_otc=False, retries=2):
+    # 使用緩存來減少 API 請求
+    cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
+    current_time = datetime.now().timestamp()
+    
+    # 檢查緩存是否存在且未過期（5分鐘）
+    if hasattr(fetch_stock_info, 'cache'):
+        cached_data = fetch_stock_info.cache.get(cache_key)
+        if cached_data and current_time - cached_data['timestamp'] < 300:  # 5分鐘緩存
+            logger.info(f"使用緩存的股票數據: {cache_key}")
+            return cached_data['data']
+    
+    # 如果沒有緩存或緩存過期，則從 API 獲取
     ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
     stock_names = load_stock_names()
+    
     for attempt in range(retries):
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info
-            price = stock.history(period="1d")["Close"].iloc[-1] if not stock.history(period="1d").empty else 0
-            long_name = info.get("longName", "")
-            short_name = info.get("shortName", "")
-            logger.info(f"股票 {ticker} 原始數據 - longName: {long_name}, shortName: {short_name}")
-            name_key = (str(code), "TWO" if is_otc else "TWSE")
-            name = stock_names.get(name_key)
-            if name:
-                logger.info(f"股票 {ticker} 從 stock_names.csv 找到名稱: {name}")
+            # 只獲取必要的價格信息，減少 API 負擔
+            history = stock.history(period="1d")
+            if not history.empty:
+                price = history["Close"].iloc[-1]
             else:
+                price = 0
+            
+            # 優先從本地 CSV 獲取股票名稱
+            name_key = (str(code), "TWO" if is_otc else "TWSE")
+            name = stock_names.get(name_key, "")
+            
+            if not name:
+                # 如果本地沒有，再嘗試從 API 獲取
+                info = stock.info
+                long_name = info.get("longName", "")
+                short_name = info.get("shortName", "")
                 name = long_name or short_name or ""
-                if name and re.search(r'[\u4e00-\u9fff]', name):
-                    logger.info(f"股票 {ticker} 找到中文名稱: {name}")
-                else:
-                    fallback_mapping = {
-                        "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
-                        "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
-                        "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
-                        "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
-                        "Radiant Opto-Electronics": "瑞儀光電股份有限公司",
-                        "MediaTek Inc.": "聯發科技股份有限公司",
-                        "Formosa Plastics Corporation": "台灣塑膠股份有限公司",
-                        "Cathay Financial Holding Co., Ltd.": "國泰金融控股股份有限公司",
-                        "Delta Electronics, Inc.": "台達電子工業股份有限公司",
-                        "Chunghwa Telecom Co., Ltd.": "中華電信股份有限公司",
-                        "United Microelectronics Corporation": "聯華電子股份有限公司",
-                        "Novatek Microelectronics Corp.": "聯詠科技股份有限公司",
-                        "Chi Mei Optoelectronics Corp.": "奇美電子股份有限公司"
-                    }
-                    name = fallback_mapping.get(name, name)
-                    if name and re.search(r'[\u4e00-\u9fff]', name):
-                        logger.info(f"股票 {ticker} 使用後備映射名稱: {name}")
-                    else:
-                        name = name or "未知名稱"
-                        logger.info(f"股票 {ticker} 未找到中文名稱，保留原始名稱: {name}")
-            return {"price": round(price, 2), "name": name}
+                
+                # 後備名稱映射
+                fallback_mapping = {
+                    "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
+                    "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
+                    "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
+                    "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
+                    # 可以添加更多映射...
+                }
+                name = fallback_mapping.get(name, name)
+            
+            result = {"price": round(price, 2), "name": name or "未知名稱"}
+            
+            # 更新緩存
+            if not hasattr(fetch_stock_info, 'cache'):
+                fetch_stock_info.cache = {}
+            fetch_stock_info.cache[cache_key] = {
+                'timestamp': current_time,
+                'data': result
+            }
+            
+            return result
         except Exception as e:
             logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
-            if attempt + 1 == retries:
-                return {"price": 0, "name": ""}
-    return {"price": 0, "name": ""}
-
+            # 等待一段時間再重試
+            import time
+            time.sleep(1)
+    
+    # 如果所有嘗試都失敗，返回默認值
+    name_key = (str(code), "TWO" if is_otc else "TWSE")
+    name = stock_names.get(name_key, "未知名稱")
+    return {"price": 0, "name": name}
+# Calculate portfolio summary
 # Calculate portfolio summary
 def get_portfolio_summary():
     try:
@@ -150,10 +172,23 @@ def get_portfolio_summary():
     total_unrealized_profit = 0
     total_realized_profit = 0
 
+    # 批量獲取股票信息，減少 API 調用
+    stock_codes_to_fetch = []
+    for code, data in summary.items():
+        if data["quantity"] > 0:
+            stock_codes_to_fetch.append((code.split(".")[0], data["is_otc"]))
+    
+    # 預先獲取所有需要的股票信息
+    stock_info_cache = {}
+    for code, is_otc in stock_codes_to_fetch:
+        stock_info_cache[(code, is_otc)] = fetch_stock_info(code, is_otc)
+
     for code, data in summary.items():
         if data["quantity"] <= 0:
             continue
-        stock_info = fetch_stock_info(code.split(".")[0], data["is_otc"])
+        
+        base_code = code.split(".")[0]
+        stock_info = stock_info_cache.get((base_code, data["is_otc"]), {"price": 0, "name": data["name"]})
         current_price = stock_info["price"]
         market_value = data["quantity"] * current_price
         avg_buy_price = data["total_cost"] / data["buy_quantity"] if data["buy_quantity"] > 0 else 0
@@ -166,7 +201,7 @@ def get_portfolio_summary():
 
         result.append({
             "Stock_Code": code,
-            "Stock_Name": data["name"],
+            "Stock_Name": stock_info["name"] or data["name"],
             "Quantity": int(data["quantity"]),
             "Avg_Buy_Price": round(avg_buy_price, 2),
             "Current_Price": round(current_price, 2),
@@ -177,7 +212,6 @@ def get_portfolio_summary():
         })
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_csv()
