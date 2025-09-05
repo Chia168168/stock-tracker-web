@@ -66,7 +66,11 @@ def load_stock_names():
 # Fetch stock info (price and name) using yfinance with retry
 # Fetch stock info (price and name) using yfinance with retry and caching
 # Fetch stock info (price and name) using yfinance with retry and caching
-def fetch_stock_info(code, is_otc=False, retries=2):
+import requests
+from datetime import datetime, time
+
+# Fetch stock info using Taiwan Stock Exchange and OTC APIs
+def fetch_stock_info(code, is_otc=False):
     # 使用緩存來減少 API 請求
     cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
     current_time = datetime.now().timestamp()
@@ -78,89 +82,98 @@ def fetch_stock_info(code, is_otc=False, retries=2):
             logger.info(f"使用緩存的股票數據: {cache_key}")
             return cached_data['data']
     
-    # 如果沒有緩存或緩存過期，則從 API 獲取
-    ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
+    # 從本地 CSV 獲取股票名稱
     stock_names = load_stock_names()
-    
-    # 優先從本地 CSV 獲取股票名稱
     name_key = (str(code), "TWO" if is_otc else "TWSE")
-    name = stock_names.get(name_key, "")
+    name = stock_names.get(name_key, "未知名稱")
     
-    # 嘗試獲取價格數據
     price = 0
-    for attempt in range(retries):
-        try:
-            stock = yf.Ticker(ticker)
-            
-            # 嘗試多種方法獲取價格
+    
+    # 檢查是否在交易時間內（台灣時間 9:00-13:30）
+    try:
+        now_utc = datetime.utcnow()
+        # 轉換為台灣時間 (UTC+8)
+        now_tw = now_utc.replace(hour=now_utc.hour + 8)
+        if now_tw.hour > 24:
+            now_tw = now_tw.replace(day=now_tw.day + 1, hour=now_tw.hour - 24)
+        
+        # 檢查是否為工作日（週一至週五）
+        is_weekday = now_tw.weekday() < 5
+        
+        # 檢查是否在交易時間內（9:00-13:30）
+        market_open = time(9, 0)
+        market_close = time(13, 30)
+        is_market_hours = market_open <= now_tw.time() <= market_close
+        
+        if is_weekday and is_market_hours:
+            # 在交易時間內，嘗試從台灣官方 API 獲取實時價格
+            if is_otc:
+                # 上櫃股票
+                price = get_otc_stock_price(code)
+            else:
+                # 上市股票
+                price = get_twse_stock_price(code)
+        else:
+            # 非交易時間，嘗試從 Yahoo Finance 獲取收盤價
             try:
-                # 方法1: 使用歷史數據
+                ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
+                stock = yf.Ticker(ticker)
                 history = stock.history(period="1d")
                 if not history.empty:
                     price = history["Close"].iloc[-1]
-                    break
             except:
-                pass
-                
-            try:
-                # 方法2: 使用快速信息
-                info = stock.fast_info
-                if hasattr(info, 'last_price') and info.last_price:
-                    price = info.last_price
-                    break
-            except:
-                pass
-                
-            try:
-                # 方法3: 使用詳細信息
-                info = stock.info
-                if 'currentPrice' in info and info['currentPrice']:
-                    price = info['currentPrice']
-                    break
-                elif 'regularMarketPrice' in info and info['regularMarketPrice']:
-                    price = info['regularMarketPrice']
-                    break
-            except:
-                pass
-                
-        except Exception as e:
-            logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
-            # 等待一段時間再重試
-            import time
-            time.sleep(1)
-    
-    # 如果沒有獲取到名稱，嘗試從 API 獲取
-    if not name:
-        try:
-            info = stock.info
-            long_name = info.get("longName", "")
-            short_name = info.get("shortName", "")
-            name = long_name or short_name or ""
-            
-            # 後備名稱映射
-            fallback_mapping = {
-                "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
-                "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
-                "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
-                "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
-                # 可以添加更多映射...
-            }
-            name = fallback_mapping.get(name, name)
-        except:
-            name = "未知名稱"
+                # 如果 Yahoo Finance 也失敗，使用 0
+                price = 0
+    except Exception as e:
+        logger.error(f"獲取股票價格時出錯: {e}")
+        price = 0
     
     result = {"price": round(price, 2), "name": name}
     
-    # 只有當獲取到有效數據時才更新緩存
-    if price > 0 or name != "未知名稱":
-        if not hasattr(fetch_stock_info, 'cache'):
-            fetch_stock_info.cache = {}
-        fetch_stock_info.cache[cache_key] = {
-            'timestamp': current_time,
-            'data': result
-        }
+    # 更新緩存
+    if not hasattr(fetch_stock_info, 'cache'):
+        fetch_stock_info.cache = {}
+    fetch_stock_info.cache[cache_key] = {
+        'timestamp': current_time,
+        'data': result
+    }
     
     return result
+
+# 從台灣證交所獲取上市股票價格
+def get_twse_stock_price(code):
+    try:
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{code}.tw&json=1&delay=0"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['msgArray']:
+            stock_info = data['msgArray'][0]
+            if 'z' in stock_info and stock_info['z']:
+                return float(stock_info['z'])
+    except Exception as e:
+        logger.error(f"從證交所獲取股票 {code} 價格失敗: {e}")
+    
+    return 0
+
+# 從櫃買中心獲取上櫃股票價格
+def get_otc_stock_price(code):
+    try:
+        url = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&d=20250905&stkno={code}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['aaData']:
+            # 獲取最新交易日的數據
+            latest_data = data['aaData'][0]
+            # 收盤價通常在索引 6
+            if len(latest_data) > 6 and latest_data[6]:
+                return float(latest_data[6].replace(',', ''))
+    except Exception as e:
+        logger.error(f"從櫃買中心獲取股票 {code} 價格失敗: {e}")
+    
+    return 0
+
 # Calculate portfolio summary
 # Calculate portfolio summary
 def get_portfolio_summary():
