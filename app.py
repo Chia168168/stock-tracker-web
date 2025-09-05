@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, send_file, flash, jsonify, make_response
 import pandas as pd
-import twstock
+import yfinance as yf
 import os
 from datetime import datetime
 import re
@@ -8,7 +8,7 @@ import io
 import logging
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24).hex()  # 使用隨機密鑰
+app.secret_key = "your_secret_key"  # 請替換為安全密鑰
 
 # 設置日誌
 logging.basicConfig(level=logging.INFO)
@@ -28,45 +28,89 @@ def initialize_csv():
         df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
 
 # Load stock names from CSV with encoding fallback
-from functools import lru_cache
-
-@lru_cache(maxsize=1)
 def load_stock_names():
     try:
-        df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
+        if not os.path.exists(STOCK_NAMES_FILE):
+            logger.warning(f"{STOCK_NAMES_FILE} 不存在，使用空映射")
+            return {}
+        try:
+            df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            logger.warning("無法以 utf-8-sig 編碼讀取 stock_names.csv，嘗試 big5")
+            try:
+                df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
+            except UnicodeDecodeError:
+                logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
+                return {}
         expected_columns = ["Code", "Name", "Market"]
         if list(df.columns) != expected_columns:
             logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
             return {}
-        stock_names = {(str(row["Code"]), row["Market"]): row["Name"] for _, row in df.iterrows()}
+        stock_names = {}
+        for _, row in df.iterrows():
+            try:
+                code = str(row["Code"])
+                market = row["Market"]
+                name = row["Name"]
+                stock_names[(code, market)] = name
+                logger.debug(f"股票映射: 代碼={code}, 市場={market}, 名稱={name}")
+            except Exception as e:
+                logger.warning(f"跳過無效行: {row.to_dict()}, 錯誤: {e}")
         logger.info(f"成功載入 {len(stock_names)} 個股票名稱")
         return stock_names
     except Exception as e:
         logger.error(f"載入 {STOCK_NAMES_FILE} 失敗: {e}")
         return {}
 
-# Fetch stock info (price and name) using twstock
+# Fetch stock info (price and name) using yfinance with retry
 def fetch_stock_info(code, is_otc=False, retries=3):
-    stock_names = load_stock_names()
     ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
-    name_key = (str(code), "TWO" if is_otc else "TWSE")
-    name = stock_names.get(name_key, "未知名稱")
+    stock_names = load_stock_names()
     for attempt in range(retries):
         try:
-            import twstock
-            stock = twstock.Stock(code)
-            data = stock.fetch(2025, 9)
-            if not data:  # 檢查資料是否為空
-                logger.error(f"股票 {ticker} 無資料")
-                return {"price": 0, "name": name}
-            price = data[-1].close
-            logger.info(f"股票 {ticker} 股價: {price}")
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            price = stock.history(period="1d")["Close"].iloc[-1] if not stock.history(period="1d").empty else 0
+            long_name = info.get("longName", "")
+            short_name = info.get("shortName", "")
+            logger.info(f"股票 {ticker} 原始數據 - longName: {long_name}, shortName: {short_name}")
+            name_key = (str(code), "TWO" if is_otc else "TWSE")
+            name = stock_names.get(name_key)
+            if name:
+                logger.info(f"股票 {ticker} 從 stock_names.csv 找到名稱: {name}")
+            else:
+                name = long_name or short_name or ""
+                if name and re.search(r'[\u4e00-\u9fff]', name):
+                    logger.info(f"股票 {ticker} 找到中文名稱: {name}")
+                else:
+                    fallback_mapping = {
+                        "Taiwan Semiconductor Manufacturing Company Limited": "台灣積體電路製造股份有限公司",
+                        "Taiwan Semiconductor Manufacturing": "台灣積體電路製造股份有限公司",
+                        "Hon Hai Precision Industry Co., Ltd.": "鴻海精密工業股份有限公司",
+                        "Hon Hai Precision Industry": "鴻海精密工業股份有限公司",
+                        "Radiant Opto-Electronics": "瑞儀光電股份有限公司",
+                        "MediaTek Inc.": "聯發科技股份有限公司",
+                        "Formosa Plastics Corporation": "台灣塑膠股份有限公司",
+                        "Cathay Financial Holding Co., Ltd.": "國泰金融控股股份有限公司",
+                        "Delta Electronics, Inc.": "台達電子工業股份有限公司",
+                        "Chunghwa Telecom Co., Ltd.": "中華電信股份有限公司",
+                        "United Microelectronics Corporation": "聯華電子股份有限公司",
+                        "Novatek Microelectronics Corp.": "聯詠科技股份有限公司",
+                        "Chi Mei Optoelectronics Corp.": "奇美電子股份有限公司"
+                    }
+                    name = fallback_mapping.get(name, name)
+                    if name and re.search(r'[\u4e00-\u9fff]', name):
+                        logger.info(f"股票 {ticker} 使用後備映射名稱: {name}")
+                    else:
+                        name = name or "未知名稱"
+                        logger.info(f"股票 {ticker} 未找到中文名稱，保留原始名稱: {name}")
             return {"price": round(price, 2), "name": name}
         except Exception as e:
             logger.error(f"抓取股票 {ticker} 的資訊失敗 (嘗試 {attempt + 1}/{retries}): {e}")
             if attempt + 1 == retries:
-                return {"price": 0, "name": name}
-    return {"price": 0, "name": name}
+                return {"price": 0, "name": ""}
+    return {"price": 0, "name": ""}
+
 # Calculate portfolio summary
 def get_portfolio_summary():
     df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
@@ -161,6 +205,7 @@ def index():
                 else:
                     quantity = float(quantity)
                     price = float(price)
+                    # 自動計算手續費和交易稅
                     fee = max(20, price * quantity * 0.001425)
                     tax = price * quantity * 0.003 if trans_type == "Sell" else 0
 
@@ -234,14 +279,6 @@ def fetch_stock_name():
         response = jsonify({"error": "請輸入股票代碼"})
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
-    stock_names = load_stock_names()
-    name_key = (str(code), market)
-    name = stock_names.get(name_key)
-    if name:
-        logger.info(f"從 stock_names.csv 找到名稱: {name}")
-        response = jsonify({"name": name, "is_english": False})
-        response.headers["Content-Type"] = "application/json; charset=utf-8"
-        return response
     is_otc = market == "TWO"
     stock_info = fetch_stock_info(code, is_otc)
     if not stock_info["name"]:
@@ -271,9 +308,5 @@ def export_transactions():
         flash(f"匯出失敗: {e}", "error")
         return redirect(url_for("index"))
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"}), 200
-
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
