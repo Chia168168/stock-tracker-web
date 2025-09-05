@@ -271,5 +271,9 @@ def export_transactions():
         flash(f"匯出失敗: {e}", "error")
         return redirect(url_for("index"))
 
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
 if __name__ == "__main__":
     app.run()
