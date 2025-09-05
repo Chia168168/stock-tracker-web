@@ -6,6 +6,7 @@
     <title>TENG台灣股票投資管理 V1.0</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700&display=swap" rel="stylesheet">
     <style>
+        /* 保持原有的樣式不變 */
         body {
             font-family: 'Noto Sans TC', Arial, sans-serif;
             font-size: 16px;
@@ -100,6 +101,12 @@
             text-align: center;
             font-size: 16px;
         }
+        .success-message {
+            color: #28a745;
+            margin-bottom: 15px;
+            text-align: center;
+            font-size: 16px;
+        }
         a {
             color: #007bff;
             text-decoration: none;
@@ -107,6 +114,17 @@
         }
         a:hover {
             text-decoration: underline;
+        }
+        .button-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .transaction-message {
+            color: #28a745;
+            font-weight: bold;
+            margin-left: 10px;
         }
         @media (max-width: 768px) {
             .form-container form {
@@ -124,6 +142,10 @@
             }
             table {
                 font-size: 14px;
+            }
+            .button-container {
+                flex-direction: column;
+                align-items: flex-start;
             }
         }
         @media (max-width: 600px) {
@@ -223,8 +245,11 @@
                 <label>每股價格 (NTD):</label>
                 <input type="number" name="price" step="0.01" required>
             </div>
-            <div>
+            <div class="button-container">
                 <button type="submit">新增交易</button>
+                {% if add_transaction_message %}
+                    <span class="transaction-message">{{ add_transaction_message }}</span>
+                {% endif %}
             </div>
         </form>
     </div>
@@ -243,7 +268,13 @@
     </div>
 
     <div>
-        <h2>投資組合總覽</h2>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+            <h2>投資組合總覽</h2>
+            <form method="POST" style="display: inline;">
+                <input type="hidden" name="action" value="update_all_prices">
+                <button type="submit" style="background-color: #28a745;">更新所有股價</button>
+            </form>
+        </div>
         <table>
             <tr>
                 <th>股票代碼</th>
