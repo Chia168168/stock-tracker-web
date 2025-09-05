@@ -124,9 +124,6 @@
             }
             table {
                 font-size: 14px;
-                display: block;
-                overflow-x: auto;
-                white-space: nowrap;
             }
         }
         @media (max-width: 600px) {
@@ -151,22 +148,16 @@
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: `code=${encodeURIComponent(code)}&market=${encodeURIComponent(market)}`
                 })
-                .then(response => {
-                    if (!response.ok) throw new Error('Network response was not ok: ' + response.status);
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
                     if (data.error) {
-                        alert(data.error);
+                        console.log(data.error);
                         document.querySelector('input[name="name"]').value = '';
                     } else {
                         document.querySelector('input[name="name"]').value = data.name;
                     }
                 })
-                .catch(error => {
-                    alert('查詢股票名稱失敗: ' + error.message);
-                    console.error('查詢失敗:', error);
-                });
+                .catch(error => console.log('查詢失敗: ' + error));
             } else {
                 document.querySelector('input[name="name"]').value = '';
             }
