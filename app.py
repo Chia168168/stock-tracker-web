@@ -359,6 +359,7 @@ def index():
     error = None
     stock_name = None
     default_date = datetime.now().strftime("%Y-%m-%d")
+    add_transaction_message = None  # 新增：用於存儲新增交易的提示訊息
 
     if request.method == "POST":
         action = request.form.get("action")
@@ -409,13 +410,27 @@ def index():
                             # 清除交易緩存
                             global TRANSACTIONS_CACHE
                             TRANSACTIONS_CACHE = None
-                            flash("交易已新增！", "success")
+                            add_transaction_message = "交易已新增！"  # 設置提示訊息
                         else:
                             error = "無法將交易添加到 Google Sheets"
                     else:
                         error = "無法連接到 Google Sheets"
                     
-                    return redirect(url_for("index"))
+                    # 重定向到當前頁面，但保留表單數據和提示訊息
+                    return render_template(
+                        "index.html",
+                        transactions=get_transactions(),
+                        summary=get_portfolio_summary()[0],
+                        total_cost=get_portfolio_summary()[1],
+                        total_market_value=get_portfolio_summary()[2],
+                        total_unrealized_profit=get_portfolio_summary()[3],
+                        total_realized_profit=get_portfolio_summary()[4],
+                        error=error,
+                        stock_name=stock_name,
+                        form_data=request.form,
+                        default_date=default_date,
+                        add_transaction_message=add_transaction_message  # 傳遞提示訊息
+                    )
             except ValueError as e:
                 error = f"輸入無效: {str(e)}。請確保股數和價格為有效數字"
 
@@ -424,7 +439,7 @@ def index():
             flash("導入功能暫不可用，請直接使用 Google Sheets 管理數據", "warning")
             
         elif action == "update_prices":
-            # 手動更新價格
+            # 手動更新單個股票價格
             for key, value in request.form.items():
                 if key.startswith("price_"):
                     stock_code = key.replace("price_", "")
@@ -440,6 +455,21 @@ def index():
                                         flash(f"已更新 {stock_code} 的價格為 {new_price}", "success")
                     except ValueError:
                         pass
+        
+        elif action == "update_all_prices":
+            # 更新所有股票價格
+            try:
+                # 清除價格緩存
+                if hasattr(fetch_stock_info, 'cache'):
+                    fetch_stock_info.cache = {}
+                
+                # 重新初始化 Google Sheets 價格數據
+                init_google_sheets()
+                
+                flash("所有股票價格已更新！", "success")
+            except Exception as e:
+                logger.error(f"更新所有股票價格時出錯: {e}")
+                flash("更新股票價格時發生錯誤", "error")
 
     # 使用緩存獲取交易數據
     transactions = get_transactions()
@@ -458,9 +488,9 @@ def index():
         error=error,
         stock_name=stock_name,
         form_data=request.form,
-        default_date=default_date
+        default_date=default_date,
+        add_transaction_message=add_transaction_message  # 傳遞提示訊息
     )
-
 @app.route("/fetch_stock_name", methods=["POST"])
 def fetch_stock_name():
     code = request.form.get("code", "").strip()
