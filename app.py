@@ -24,6 +24,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRANSACTION_FILE = os.path.join(BASE_DIR, "stock_transactions.csv")
 STOCK_NAMES_FILE = os.path.join(BASE_DIR, "stock_names.csv")
 
+# 全局緩存變量
+TRANSACTIONS_CACHE = None
+TRANSACTIONS_CACHE_TIME = None
+TRANSACTIONS_CACHE_DURATION = 300  # 5分鐘緩存
+
 # Google Sheets 設置
 def setup_google_sheets():
     try:
@@ -65,135 +70,7 @@ def get_prices_from_google_sheet(client, sheet_name, worksheet_name="Sheet1"):
         logger.error(f"從 Google Sheets 讀取數據時出錯: {e}")
         return {}
 
-# 在應用啟動時初始化 Google Sheets 連接
-def init_google_sheets():
-    try:
-        client = setup_google_sheets()
-        if client:
-            # 從環境變量獲取試算表名稱
-            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票價格')
-            worksheet_name = os.environ.get('GOOGLE_WORKSHEET_NAME', 'Sheet1')
-            
-            # 讀取價格數據
-            prices = get_prices_from_google_sheet(client, sheet_name, worksheet_name)
-            
-            # 將價格數據存儲在函數屬性中
-            fetch_stock_info.google_sheets_prices = prices
-            logger.info(f"從 Google Sheets 成功讀取 {len(prices)} 個股票價格")
-        else:
-            logger.warning("無法初始化 Google Sheets 連接")
-            fetch_stock_info.google_sheets_prices = {}
-    except Exception as e:
-        logger.error(f"初始化 Google Sheets 時出錯: {e}")
-        fetch_stock_info.google_sheets_prices = {}
-
-# 定期更新 Google Sheets 數據
-def schedule_google_sheets_update(interval_minutes=15):
-    def update():
-        while True:
-            try:
-                time.sleep(interval_minutes * 60)
-                init_google_sheets()
-            except Exception as e:
-                logger.error(f"定期更新 Google Sheets 數據時出錯: {e}")
-    
-    # 啟動後台線程
-    thread = threading.Thread(target=update)
-    thread.daemon = True
-    thread.start()
-
-# Initialize CSV file for transactions if it doesn't exist
-def initialize_csv():
-    if not os.path.exists(TRANSACTION_FILE):
-        df = pd.DataFrame(columns=[
-            "Date", "Stock_Code", "Stock_Name", "Type", 
-            "Quantity", "Price", "Fee", "Tax"
-        ])
-        df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
-
-# Load stock names from CSV with encoding fallback
-def load_stock_names():
-    try:
-        if not os.path.exists(STOCK_NAMES_FILE):
-            logger.warning(f"{STOCK_NAMES_FILE} 不存在，使用空映射")
-            return {}
-        try:
-            df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
-        except UnicodeDecodeError:
-            logger.warning("無法以 utf-8-sig 編碼讀取 stock_names.csv，嘗試 big5")
-            try:
-                df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
-            except UnicodeDecodeError:
-                logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
-                return {}
-        expected_columns = ["Code", "Name", "Market"]
-        if list(df.columns) != expected_columns:
-            logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
-            logger.error(f"實際欄位: {list(df.columns)}")
-            return {}
-        stock_names = {}
-        for _, row in df.iterrows():
-            try:
-                code = str(row["Code"])
-                market = row["Market"]
-                name = row["Name"]
-                stock_names[(code, market)] = name
-                logger.debug(f"股票映射: 代碼={code}, 市場={market}, 名稱={name}")
-            except Exception as e:
-                logger.warning(f"跳過無效行: {row.to_dict()}, 錯誤: {e}")
-        logger.info(f"成功載入 {len(stock_names)} 個股票名稱")
-        return stock_names
-    except Exception as e:
-        logger.error(f"載入 {STOCK_NAMES_FILE} 失敗: {e}")
-        return {}
-
-# Fetch stock info - 使用 Google Sheets 數據
-def fetch_stock_info(code, is_otc=False):
-    # 使用緩存來減少 API 請求
-    cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
-    current_time = datetime.now().timestamp()
-    
-    # 檢查緩存是否存在且未過期（5分鐘）
-    if hasattr(fetch_stock_info, 'cache'):
-        cached_data = fetch_stock_info.cache.get(cache_key)
-        if cached_data and current_time - cached_data['timestamp'] < 300:  # 5分鐘緩存
-            logger.info(f"使用緩存的股票數據: {cache_key}")
-            return cached_data['data']
-    
-    # 從本地 CSV 獲取股票名稱
-    stock_names = load_stock_names()
-    name_key = (str(code), "TWO" if is_otc else "TWSE")
-    name = stock_names.get(name_key, "未知名稱")
-    
-    # 嘗試從 Google Sheets 獲取價格
-    price = 0
-    if hasattr(fetch_stock_info, 'google_sheets_prices'):
-        price = fetch_stock_info.google_sheets_prices.get(str(code), 0)
-    
-    # 如果 Google Sheets 沒有數據，嘗試從 Yahoo Finance 獲取
-    if price == 0:
-        try:
-            ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
-            stock = yf.Ticker(ticker)
-            history = stock.history(period="1d")
-            if not history.empty:
-                price = history["Close"].iloc[-1]
-        except Exception as e:
-            logger.error(f"從 Yahoo Finance 獲取股票 {ticker} 價格失敗: {e}")
-    
-    result = {"price": round(price, 2), "name": name}
-    
-    # 更新緩存
-    if not hasattr(fetch_stock_info, 'cache'):
-        fetch_stock_info.cache = {}
-    fetch_stock_info.cache[cache_key] = {
-        'timestamp': current_time,
-        'data': result
-    }
-    
-    return result
-
-# 添加函數來讀取和寫入交易數據到 Google Sheets
+# 從 Google Sheets 讀取交易數據
 def get_transactions_from_google_sheet(client, sheet_name, worksheet_name="交易紀錄"):
     try:
         # 打開試算表
@@ -221,6 +98,7 @@ def get_transactions_from_google_sheet(client, sheet_name, worksheet_name="交�
         logger.error(f"從 Google Sheets 讀取交易數據時出錯: {e}")
         return []
 
+# 添加交易到 Google Sheets
 def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transaction):
     try:
         # 打開試算表
@@ -247,7 +125,7 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
         return False
 
-# 修改 initialize_csv 函數以初始化 Google Sheets
+# 初始化 Google Sheets
 def initialize_google_sheets():
     try:
         client = setup_google_sheets()
@@ -270,17 +148,151 @@ def initialize_google_sheets():
         logger.error(f"初始化 Google Sheets 時出錯: {e}")
         return False
 
-# 修改 get_portfolio_summary 函數以使用 Google Sheets 數據
-def get_portfolio_summary():
+# 在應用啟動時初始化 Google Sheets 連接
+def init_google_sheets():
+    try:
+        client = setup_google_sheets()
+        if client:
+            # 從環境變量獲取試算表名稱
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票價格')
+            worksheet_name = os.environ.get('GOOGLE_WORKSHEET_NAME', 'Sheet1')
+            
+            try:
+                # 讀取價格數據
+                prices = get_prices_from_google_sheet(client, sheet_name, worksheet_name)
+                
+                # 將價格數據存儲在函數屬性中
+                fetch_stock_info.google_sheets_prices = prices
+                logger.info(f"從 Google Sheets 成功讀取 {len(prices)} 個股票價格")
+            except Exception as e:
+                logger.error(f"從 Google Sheets 讀取價格數據時出錯: {e}")
+                # 使用空字典作為降級方案
+                fetch_stock_info.google_sheets_prices = {}
+        else:
+            logger.warning("無法初始化 Google Sheets 連接")
+            fetch_stock_info.google_sheets_prices = {}
+    except Exception as e:
+        logger.error(f"初始化 Google Sheets 時出錯: {e}")
+        fetch_stock_info.google_sheets_prices = {}
+
+# 定期更新 Google Sheets 數據
+def schedule_google_sheets_update(interval_minutes=30):  # 改為每30分鐘更新一次
+    def update():
+        while True:
+            try:
+                time.sleep(interval_minutes * 60)
+                init_google_sheets()
+            except Exception as e:
+                logger.error(f"定期更新 Google Sheets 數據時出錯: {e}")
+    
+    # 啟動後台線程
+    thread = threading.Thread(target=update)
+    thread.daemon = True
+    thread.start()
+
+# 獲取交易數據（使用緩存）
+def get_transactions():
+    global TRANSACTIONS_CACHE, TRANSACTIONS_CACHE_TIME
+    
+    current_time = time.time()
+    if (TRANSACTIONS_CACHE is not None and 
+        TRANSACTIONS_CACHE_TIME is not None and
+        current_time - TRANSACTIONS_CACHE_TIME < TRANSACTIONS_CACHE_DURATION):
+        logger.info("使用緩存的交易數據")
+        return TRANSACTIONS_CACHE
+    
     try:
         client = setup_google_sheets()
         if client:
             sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
             transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
+            TRANSACTIONS_CACHE = transactions
+            TRANSACTIONS_CACHE_TIME = current_time
+            logger.info(f"從 Google Sheets 讀取 {len(transactions)} 筆交易數據")
+            return transactions
         else:
-            transactions = []
-    except:
-        transactions = []
+            return []
+    except Exception as e:
+        logger.error(f"獲取交易數據時出錯: {e}")
+        return []
+
+# Load stock names from CSV with encoding fallback
+def load_stock_names():
+    try:
+        if not os.path.exists(STOCK_NAMES_FILE):
+            logger.warning(f"{STOCK_NAMES_FILE} 不存在，使用空映射")
+            return {}
+        try:
+            df = pd.read_csv(STOCK_NAMES_FILE, encoding='utf-8-sig')
+        except UnicodeDecodeError:
+            logger.warning("無法以 utf-8-sig 編碼讀取 stock_names.csv，嘗試 big5")
+            try:
+                df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
+            except UnicodeDecodeError:
+                logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
+                return {}
+        expected_columns = ["Code", "Name", "Market"]
+        if list(df.columns) != expected_columns:
+            logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
+            return {}
+        stock_names = {}
+        for _, row in df.iterrows():
+            try:
+                code = str(row["Code"])
+                market = row["Market"]
+                name = row["Name"]
+                stock_names[(code, market)] = name
+                logger.debug(f"股票映射: 代碼={code}, 市場={market}, 名稱={name}")
+            except Exception as e:
+                logger.warning(f"跳過無效行: {row.to_dict()}, 錯誤: {e}")
+        logger.info(f"成功載入 {len(stock_names)} 個股票名稱")
+        return stock_names
+    except Exception as e:
+        logger.error(f"載入 {STOCK_NAMES_FILE} 失敗: {e}")
+        return {}
+
+# Fetch stock info - 使用 Google Sheets 數據
+def fetch_stock_info(code, is_otc=False):
+    # 使用緩存來減少 API 請求
+    cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
+    current_time = time.time()
+    
+    # 檢查緩存是否存在且未過期（30分鐘）
+    if hasattr(fetch_stock_info, 'cache'):
+        cached_data = fetch_stock_info.cache.get(cache_key)
+        if cached_data and current_time - cached_data['timestamp'] < 1800:  # 30分鐘緩存
+            logger.info(f"使用緩存的股票數據: {cache_key}")
+            return cached_data['data']
+    
+    # 從本地 CSV 獲取股票名稱
+    stock_names = load_stock_names()
+    name_key = (str(code), "TWO" if is_otc else "TWSE")
+    name = stock_names.get(name_key, "未知名稱")
+    
+    # 嘗試從 Google Sheets 獲取價格
+    price = 0
+    if hasattr(fetch_stock_info, 'google_sheets_prices'):
+        price = fetch_stock_info.google_sheets_prices.get(str(code), 0)
+    
+    # 如果 Google Sheets 沒有數據，使用默認值而不是嘗試 Yahoo Finance
+    # 因為 Yahoo Finance 在 Render 環境中不可靠
+    
+    result = {"price": round(price, 2), "name": name}
+    
+    # 更新緩存
+    if not hasattr(fetch_stock_info, 'cache'):
+        fetch_stock_info.cache = {}
+    fetch_stock_info.cache[cache_key] = {
+        'timestamp': current_time,
+        'data': result
+    }
+    
+    return result
+
+# Calculate portfolio summary
+def get_portfolio_summary(transactions=None):
+    if transactions is None:
+        transactions = get_transactions()
         
     if not transactions:
         return [], 0, 0, 0, 0
@@ -340,6 +352,7 @@ def get_portfolio_summary():
         })
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_google_sheets()
@@ -393,6 +406,9 @@ def index():
                     if client:
                         sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
                         if add_transaction_to_google_sheet(client, sheet_name, "交易紀錄", new_transaction):
+                            # 清除交易緩存
+                            global TRANSACTIONS_CACHE
+                            TRANSACTIONS_CACHE = None
                             flash("交易已新增！", "success")
                         else:
                             error = "無法將交易添加到 Google Sheets"
@@ -420,23 +436,16 @@ def index():
                                 for cache_key in list(fetch_stock_info.cache.keys()):
                                     if stock_code in cache_key:
                                         fetch_stock_info.cache[cache_key]['data']['price'] = new_price
-                                        fetch_stock_info.cache[cache_key]['timestamp'] = datetime.now().timestamp()
+                                        fetch_stock_info.cache[cache_key]['timestamp'] = time.time()
                                         flash(f"已更新 {stock_code} 的價格為 {new_price}", "success")
                     except ValueError:
                         pass
 
-    # 獲取交易數據
-    try:
-        client = setup_google_sheets()
-        if client:
-            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
-            transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
-        else:
-            transactions = []
-    except:
-        transactions = []
+    # 使用緩存獲取交易數據
+    transactions = get_transactions()
     
-    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary()
+    # 獲取投資組合摘要
+    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
     
     return render_template(
         "index.html",
@@ -493,15 +502,6 @@ def fetch_stock_name():
         
         if not name:
             logger.error(f"無法找到股票 {code} 的名稱，查找的鍵: {name_key}")
-            # 嘗試從 Google Sheets 獲取名稱
-            try:
-                if hasattr(fetch_stock_info, 'google_sheets_prices'):
-                    # 假設 Google Sheets 中有名稱數據
-                    # 這裡需要根據您的實際數據結構進行調整
-                    pass
-            except:
-                pass
-            
             response = jsonify({"error": f"無法找到股票 {code} 的名稱，請手動輸入名稱"})
             response.headers["Content-Type"] = "application/json; charset=utf-8"
             return response
@@ -510,6 +510,7 @@ def fetch_stock_name():
     response = jsonify({"name": name, "is_english": not re.search(r'[\u4e00-\u9fff]', name)})
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
+
 @app.route("/export_transactions")
 def export_transactions():
     try:
@@ -536,10 +537,11 @@ def export_transactions():
     except Exception as e:
         flash(f"匯出失敗: {e}", "error")
         return redirect(url_for("index"))
+
 # 初始化 Google Sheets
 init_google_sheets()
 # 啟動定期更新
-schedule_google_sheets_update(15)  # 每15分鐘更新一次
+schedule_google_sheets_update(30)  # 每30分鐘更新一次
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
