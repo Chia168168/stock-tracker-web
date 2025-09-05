@@ -8,15 +8,16 @@ import io
 import logging
 
 app = Flask(__name__)
-app.secret_key = "your_secret_key"  # 請替換為安全密鑰
+app.secret_key = os.environ.get("SECRET_KEY", "dev_secret_key")  # 使用環境變數
 
 # 設置日誌
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# File to store transactions and stock names
-TRANSACTION_FILE = "stock_transactions.csv"
-STOCK_NAMES_FILE = "stock_names.csv"
+# 使用絕對路徑來存儲文件
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRANSACTION_FILE = os.path.join(BASE_DIR, "stock_transactions.csv")
+STOCK_NAMES_FILE = os.path.join(BASE_DIR, "stock_names.csv")
 
 # Initialize CSV file for transactions if it doesn't exist
 def initialize_csv():
@@ -113,7 +114,11 @@ def fetch_stock_info(code, is_otc=False, retries=3):
 
 # Calculate portfolio summary
 def get_portfolio_summary():
-    df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
+    try:
+        df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
+    except:
+        return [], 0, 0, 0, 0
+        
     if df.empty:
         return [], 0, 0, 0, 0
 
@@ -253,7 +258,11 @@ def index():
             else:
                 error = "請選擇有效的 CSV 檔案"
 
-    transactions = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig').to_dict("records")
+    try:
+        transactions = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig').to_dict("records")
+    except:
+        transactions = []
+    
     summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary()
     
     return render_template(
@@ -309,4 +318,5 @@ def export_transactions():
         return redirect(url_for("index"))
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
