@@ -193,18 +193,100 @@ def fetch_stock_info(code, is_otc=False):
     
     return result
 
-# Calculate portfolio summary
+# 添加函數來讀取和寫入交易數據到 Google Sheets
+def get_transactions_from_google_sheet(client, sheet_name, worksheet_name="交易紀錄"):
+    try:
+        # 打開試算表
+        sheet = client.open(sheet_name).worksheet(worksheet_name)
+        
+        # 讀取所有數據
+        data = sheet.get_all_records()
+        
+        # 轉換為與原來相同的格式
+        transactions = []
+        for row in data:
+            transactions.append({
+                "Date": row.get("Date", ""),
+                "Stock_Code": row.get("Stock_Code", ""),
+                "Stock_Name": row.get("Stock_Name", ""),
+                "Type": row.get("Type", ""),
+                "Quantity": float(row.get("Quantity", 0)),
+                "Price": float(row.get("Price", 0)),
+                "Fee": float(row.get("Fee", 0)),
+                "Tax": float(row.get("Tax", 0))
+            })
+        
+        return transactions
+    except Exception as e:
+        logger.error(f"從 Google Sheets 讀取交易數據時出錯: {e}")
+        return []
+
+def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transaction):
+    try:
+        # 打開試算表
+        sheet = client.open(sheet_name).worksheet(worksheet_name)
+        
+        # 獲取現有數據以確定新行的位置
+        existing_data = sheet.get_all_values()
+        next_row = len(existing_data) + 1 if existing_data else 2  # 標題行佔用第1行
+        
+        # 添加新交易
+        sheet.append_row([
+            transaction["Date"],
+            transaction["Stock_Code"],
+            transaction["Stock_Name"],
+            transaction["Type"],
+            transaction["Quantity"],
+            transaction["Price"],
+            transaction["Fee"],
+            transaction["Tax"]
+        ])
+        
+        return True
+    except Exception as e:
+        logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
+        return False
+
+# 修改 initialize_csv 函數以初始化 Google Sheets
+def initialize_google_sheets():
+    try:
+        client = setup_google_sheets()
+        if client:
+            # 從環境變量獲取試算表名稱
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+            
+            # 檢查交易紀錄工作表是否存在，如果不存在則創建
+            try:
+                sheet = client.open(sheet_name).worksheet("交易紀錄")
+            except gspread.exceptions.WorksheetNotFound:
+                # 創建交易紀錄工作表
+                sheet = client.open(sheet_name).add_worksheet(title="交易紀錄", rows=1000, cols=20)
+                # 添加標題行
+                sheet.append_row(["Date", "Stock_Code", "Stock_Name", "Type", "Quantity", "Price", "Fee", "Tax"])
+            
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"初始化 Google Sheets 時出錯: {e}")
+        return False
+
+# 修改 get_portfolio_summary 函數以使用 Google Sheets 數據
 def get_portfolio_summary():
     try:
-        df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
+        client = setup_google_sheets()
+        if client:
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+            transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
+        else:
+            transactions = []
     except:
-        return [], 0, 0, 0, 0
+        transactions = []
         
-    if df.empty:
+    if not transactions:
         return [], 0, 0, 0, 0
 
     summary = {}
-    for _, row in df.iterrows():
+    for row in transactions:
         code = row["Stock_Code"]
         if code not in summary:
             summary[code] = {
@@ -258,10 +340,9 @@ def get_portfolio_summary():
         })
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
-
 @app.route("/", methods=["GET", "POST"])
 def index():
-    initialize_csv()
+    initialize_google_sheets()
     error = None
     stock_name = None
     default_date = datetime.now().strftime("%Y-%m-%d")
@@ -306,39 +387,26 @@ def index():
                         "Fee": fee,
                         "Tax": tax
                     }
-                    df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
-                    df = pd.concat([df, pd.DataFrame([new_transaction])], ignore_index=True)
-                    df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
-                    flash("交易已新增！", "success")
+                    
+                    # 添加到 Google Sheets
+                    client = setup_google_sheets()
+                    if client:
+                        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+                        if add_transaction_to_google_sheet(client, sheet_name, "交易紀錄", new_transaction):
+                            flash("交易已新增！", "success")
+                        else:
+                            error = "無法將交易添加到 Google Sheets"
+                    else:
+                        error = "無法連接到 Google Sheets"
+                    
                     return redirect(url_for("index"))
             except ValueError as e:
                 error = f"輸入無效: {str(e)}。請確保股數和價格為有效數字"
 
         elif action == "import_transactions":
-            file = request.files.get("import_file")
-            if file and file.filename.endswith(".csv"):
-                try:
-                    imported_df = pd.read_csv(file, encoding='utf-8-sig')
-                    expected_columns = ["Date", "Stock_Code", "Stock_Name", "Type", "Quantity", "Price", "Fee", "Tax"]
-                    if list(imported_df.columns) != expected_columns:
-                        error = "匯入檔案格式不正確，需包含正確欄位"
-                    else:
-                        if not all(imported_df["Quantity"].apply(lambda x: x % 1000 == 0)):
-                            error = "匯入檔案中的股數必須為1000的倍數"
-                        else:
-                            overwrite = request.form.get("overwrite") == "on"
-                            if overwrite:
-                                imported_df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
-                            else:
-                                current_df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
-                                combined_df = pd.concat([current_df, imported_df], ignore_index=True)
-                                combined_df.to_csv(TRANSACTION_FILE, index=False, encoding='utf-8-sig')
-                            flash("交易紀錄已匯入！", "success")
-                except Exception as e:
-                    error = f"匯入失敗: {e}"
-            else:
-                error = "請選擇有效的 CSV 檔案"
-
+            # 這裡可以實現從 CSV 導入到 Google Sheets 的功能
+            flash("導入功能暫不可用，請直接使用 Google Sheets 管理數據", "warning")
+            
         elif action == "update_prices":
             # 手動更新價格
             for key, value in request.form.items():
@@ -357,8 +425,14 @@ def index():
                     except ValueError:
                         pass
 
+    # 獲取交易數據
     try:
-        transactions = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig').to_dict("records")
+        client = setup_google_sheets()
+        if client:
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+            transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
+        else:
+            transactions = []
     except:
         transactions = []
     
@@ -439,20 +513,29 @@ def fetch_stock_name():
 @app.route("/export_transactions")
 def export_transactions():
     try:
-        df = pd.read_csv(TRANSACTION_FILE, encoding='utf-8-sig')
-        output = io.StringIO()
-        df.to_csv(output, index=False, encoding='utf-8-sig')
-        output.seek(0)
-        return send_file(
-            io.BytesIO(output.getvalue().encode("utf-8-sig")),
-            mimetype="text/csv; charset=utf-8",
-            as_attachment=True,
-            download_name=f"exported_transactions_{datetime.now().strftime('%Y%m%d')}.csv"
-        )
+        client = setup_google_sheets()
+        if client:
+            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+            transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
+            
+            # 轉換為 DataFrame 並導出為 CSV
+            df = pd.DataFrame(transactions)
+            output = io.StringIO()
+            df.to_csv(output, index=False, encoding='utf-8-sig')
+            output.seek(0)
+            
+            return send_file(
+                io.BytesIO(output.getvalue().encode("utf-8-sig")),
+                mimetype="text/csv; charset=utf-8",
+                as_attachment=True,
+                download_name=f"exported_transactions_{datetime.now().strftime('%Y%m%d')}.csv"
+            )
+        else:
+            flash("無法連接到 Google Sheets", "error")
+            return redirect(url_for("index"))
     except Exception as e:
         flash(f"匯出失敗: {e}", "error")
         return redirect(url_for("index"))
-
 # 初始化 Google Sheets
 init_google_sheets()
 # 啟動定期更新
