@@ -353,6 +353,10 @@ def index():
     default_date = datetime.now().strftime("%Y-%m-%d")
     add_transaction_message = None
 
+    # 獲取交易數據和投資組合摘要
+    transactions = get_transactions()
+    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+
     if request.method == "POST":
         action = request.form.get("action")
         
@@ -407,28 +411,31 @@ def index():
                             # 如果是買入交易，顯示額外訊息
                             if trans_type == "Buy":
                                 add_transaction_message += " 已檢查並更新股票列表。"
+                            
+                            # 重新獲取交易數據
+                            transactions = get_transactions()
+                            summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
                         else:
                             error = "無法將交易添加到 Google Sheets"
                     else:
                         error = "無法連接到 Google Sheets"
-                    
-                    return render_template(
-                        "index.html",
-                        transactions=get_transactions(),
-                        summary=get_portfolio_summary()[0],
-                        total_cost=get_portfolio_summary()[1],
-                        total_market_value=get_portfolio_summary()[2],
-                        total_unrealized_profit=get_portfolio_summary()[3],
-                        total_realized_profit=get_portfolio_summary()[4],
-                        error=error,
-                        stock_name=stock_name,
-                        form_data=request.form,
-                        default_date=default_date,
-                        add_transaction_message=add_transaction_message
-                    )
             except ValueError as e:
                 error = f"輸入無效: {str(e)}。請確保股數和價格為有效數字"
 
+    # 渲染模板（適用於 GET 和 POST 請求）
+    return render_template(
+        "index.html",
+        transactions=transactions,
+        summary=summary,
+        total_cost=total_cost,
+        total_market_value=total_market_value,
+        total_unrealized_profit=total_unrealized_profit,
+        total_realized_profit=total_realized_profit,
+        error=error,
+        stock_name=stock_name,
+        default_date=default_date,
+        add_transaction_message=add_transaction_message
+    )
         # 其餘的 POST 處理邏輯保持不變...
 @app.route("/fetch_stock_name", methods=["POST"])
 def fetch_stock_name():
