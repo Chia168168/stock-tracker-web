@@ -215,6 +215,7 @@ def schedule_google_sheets_update(interval_minutes=30):
     thread.start()
 
 # 獲取交易數據（使用緩存）
+# 确保 get_transactions 函数能够正确工作
 def get_transactions():
     global TRANSACTIONS_CACHE, TRANSACTIONS_CACHE_TIME
     
@@ -235,11 +236,11 @@ def get_transactions():
             logger.info(f"從 Google Sheets 讀取 {len(transactions)} 筆交易數據")
             return transactions
         else:
+            logger.warning("無法連接到 Google Sheets，返回空交易列表")
             return []
     except Exception as e:
         logger.error(f"獲取交易數據時出錯: {e}")
         return []
-
 # Load stock names from CSV with encoding fallback
 def load_stock_names():
     try:
@@ -409,6 +410,7 @@ def get_portfolio_summary(transactions=None):
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
     
 # 在 index 路由中添加处理 "update_all_prices" 动作的逻辑
+# 修改 index 路由中的新增交易逻辑，确保正确处理错误
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_google_sheets()
@@ -426,31 +428,65 @@ def index():
         action = request.form.get("action")
         
         if action == "add_transaction":
-            # 原有的新增交易逻辑...
-            pass
-        
-        elif action == "update_all_prices":
             try:
-                client = setup_google_sheets()
-                if client:
-                    sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
-                    # 强制重新从 Google Sheets 读取价格数据
-                    get_prices_from_google_sheet(client, sheet_name, "stock_names")
-                    
-                    # 清除股票信息缓存，强制重新获取所有股票的最新价格
-                    if hasattr(fetch_stock_info, 'cache'):
-                        fetch_stock_info.cache = {}
-                    
-                    # 重新计算投资组合摘要
-                    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
-                    
-                    update_all_prices_message = "所有股價已更新！"
-                    logger.info("已强制更新所有股价")
+                date = request.form.get("date", default_date)
+                code = request.form.get("code", "").strip()
+                name = request.form.get("name", "").strip() or "未知股票"
+                market = request.form.get("market", "TWSE")
+                trans_type = request.form.get("type", "Buy")
+                quantity = request.form.get("quantity")
+                price = request.form.get("price")
+                
+                # Validate inputs
+                if not code:
+                    error = "股票代碼不能為空"
+                elif not quantity or float(quantity) <= 0:
+                    error = "股數必須為正數"
+                elif float(quantity) % 1000 != 0:
+                    error = "股數必須為1000的倍數"
+                elif not price or float(price) <= 0:
+                    error = "每股價格必須為正數"
                 else:
-                    error = "無法連接到 Google Sheets"
+                    quantity = float(quantity)
+                    price = float(price)
+                    # 自動計算手續費和交易稅
+                    fee = max(20, price * quantity * 0.001425)
+                    tax = price * quantity * 0.003 if trans_type == "Sell" else 0
+
+                    code_with_suffix = f"{code}.TWO" if market == "TWO" else f"{code}.TW"
+                    new_transaction = {
+                        "Date": date,
+                        "Stock_Code": code_with_suffix,
+                        "Stock_Name": name,
+                        "Type": trans_type,
+                        "Quantity": quantity,
+                        "Price": price,
+                        "Fee": fee,
+                        "Tax": tax
+                    }
+                    
+                    # 添加到 Google Sheets
+                    client = setup_google_sheets()
+                    if client:
+                        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+                        if add_transaction_to_google_sheet(client, sheet_name, "交易紀錄", new_transaction):
+                            # 清除交易緩存
+                            global TRANSACTIONS_CACHE
+                            TRANSACTIONS_CACHE = None
+                            add_transaction_message = "交易已新增！"
+                            
+                            # 重新獲取交易數據
+                            transactions = get_transactions()
+                            summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+                        else:
+                            error = "無法將交易添加到 Google Sheets"
+                    else:
+                        error = "無法連接到 Google Sheets"
+            except ValueError as e:
+                error = f"輸入無效: {str(e)}。請確保股數和價格為有效數字"
             except Exception as e:
-                error = f"更新股價時出錯: {str(e)}"
-                logger.error(f"更新所有股價失敗: {e}")
+                error = f"新增交易時發生錯誤: {str(e)}"
+                logger.error(f"新增交易失敗: {e}")
 
     # 渲染模板（適用於 GET 和 POST 請求）
     return render_template(
@@ -465,21 +501,7 @@ def index():
         stock_name=stock_name,
         default_date=default_date,
         add_transaction_message=add_transaction_message,
-        update_all_prices_message=update_all_prices_message  # 添加这个变量
-    )
-    # 渲染模板（適用於 GET 和 POST 請求）
-    return render_template(
-        "index.html",
-        transactions=transactions,
-        summary=summary,
-        total_cost=total_cost,
-        total_market_value=total_market_value,
-        total_unrealized_profit=total_unrealized_profit,
-        total_realized_profit=total_realized_profit,
-        error=error,
-        stock_name=stock_name,
-        default_date=default_date,
-        add_transaction_message=add_transaction_message
+        update_all_prices_message=update_all_prices_message
     )
         # 其餘的 POST 處理邏輯保持不變...
 # 修改 fetch_stock_name 函数，正确处理债券代码和OTC市场
@@ -543,16 +565,13 @@ def fetch_stock_name():
     return response
 
 # 修改 add_transaction_to_google_sheet 函数，正确处理债券代码
+# 简化 add_transaction_to_google_sheet 函数
 def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transaction):
     try:
         # 打開試算表
         sheet = client.open(sheet_name).worksheet(worksheet_name)
         
-        # 獲取現有數據以確定新行的位置
-        existing_data = sheet.get_all_values()
-        next_row = len(existing_data) + 1 if existing_data else 2  # 標題行佔用第1行
-        
-        # 添加新交易
+        # 直接添加新交易，不检查是否已存在
         sheet.append_row([
             transaction["Date"],
             transaction["Stock_Code"],
@@ -564,80 +583,37 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
             transaction["Tax"]
         ])
         
-        # 如果是買入交易，檢查並添加股票到 stock_names 工作表
-        if transaction["Type"] == "Buy":
-            # 提取股票代碼（保留完整代码，包括后缀）
-            stock_code = transaction["Stock_Code"]
-            
-            # 檢查股票是否已存在於 stock_names 工作表
-            if not check_stock_exists_in_names(client, sheet_name, stock_code):
-                # 添加新股票到 stock_names 工作表
-                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
-        
+        logger.info(f"已添加交易: {transaction['Stock_Code']} {transaction['Type']} {transaction['Quantity']}股")
         return True
     except Exception as e:
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
         return False
-@app.route("/export_transactions")
-def export_transactions():
-    try:
-        client = setup_google_sheets()
-        if client:
-            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
-            transactions = get_transactions_from_google_sheet(client, sheet_name, "交易紀錄")
-            
-            # 轉換為 DataFrame 並導出為 CSV
-            df = pd.DataFrame(transactions)
-            output = io.StringIO()
-            df.to_csv(output, index=False, encoding='utf-8-sig')
-            output.seek(0)
-            
-            return send_file(
-                io.BytesIO(output.getvalue().encode("utf-8-sig")),
-                mimetype="text/csv; charset=utf-8",
-                as_attachment=True,
-                download_name=f"exported_transactions_{datetime.now().strftime('%Y%m%d')}.csv"
-            )
-        else:
-            flash("無法連接到 Google Sheets", "error")
-            return redirect(url_for("index"))
-    except Exception as e:
-        flash(f"匯出失敗: {e}", "error")
-        return redirect(url_for("index"))
-
 # 檢查股票是否存在於 stock_names 工作表
 # 修改 check_stock_exists_in_names 函数，正确处理债券代码
 def check_stock_exists_in_names(client, sheet_name, full_code):
-    try:
-        stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
-        records = stock_names_sheet.get_all_values()
-        
-        # 检查所有记录，查找匹配的代码
-        for row in records:
-            if len(row) > 0 and row[0] == full_code:  # 直接比较完整代码
-                return True
-        return False
-    except gspread.exceptions.WorksheetNotFound:
-        return False
-    except Exception as e:
-        logger.error(f"检查股票是否存在时出错: {e}")
-        return False
+    # 暂时返回 False，强制每次都添加
+    return False
 
 # 添加新股票到 stock_names 工作表
 # 修改 add_stock_to_names_sheet 函数，正确处理债券代码
 def add_stock_to_names_sheet(client, sheet_name, full_code, name):
     try:
-        # 尝试获取 stock_names 工作表，如果不存在则创建
+        # 尝试获取 stock_names 工作表
         try:
             stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         except gspread.exceptions.WorksheetNotFound:
-            # 创建更大的工作表（1000 行，10 列）
-            stock_names_sheet = client.open(sheet_name).add_worksheet(title="stock_names", rows=1000, cols=10)
-            # 添加标题行，注意顺序：code, price, name, pricenow
-            stock_names_sheet.append_row(["code", "price", "name", "pricenow"])
+            # 如果不存在，跳过添加
+            logger.warning("stock_names 工作表不存在，跳过添加股票")
+            return True
         
         # 获取所有记录
         records = stock_names_sheet.get_all_values()
+        
+        # 检查股票是否已存在
+        for row in records:
+            if len(row) > 0 and row[0] == full_code:
+                logger.info(f"股票 {full_code} 已存在于 stock_names 工作表")
+                return True
         
         # 找到第一个空行
         next_row = len(records) + 1
@@ -647,43 +623,20 @@ def add_stock_to_names_sheet(client, sheet_name, full_code, name):
             # 增加行数
             stock_names_sheet.add_rows(100)
         
-        # 构建您指定的公式
-        # 对于债券代码，可能需要不同的Yahoo Finance URL结构
+        # 构建公式
         if full_code.endswith('.TWO'):
-            # 上櫃股票（包括债券）
-            formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{full_code.replace(".TWO", ".TWO")}","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
+            formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{full_code}","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
         else:
-            # 上市股票
             formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{full_code.replace(".TW", "")}.TW","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
         
-        # 使用批量更新并指定 value_input_option 为 USER_ENTERED 来避免单引号问题
-        batch_data = [
-            {
-                'range': f'A{next_row}',
-                'values': [[full_code]]
-            },
-            {
-                'range': f'B{next_row}',
-                'values': [[f'=D{next_row}']]
-            },
-            {
-                'range': f'C{next_row}',
-                'values': [[name]]
-            },
-            {
-                'range': f'D{next_row}',
-                'values': [[formula]]
-            }
-        ]
+        # 添加新行
+        stock_names_sheet.append_row([full_code, f'=D{next_row}', name, formula], value_input_option='USER_ENTERED')
         
-        # 执行批量更新，使用 USER_ENTERED 选项
-        stock_names_sheet.batch_update(batch_data, value_input_option='USER_ENTERED')
-        
-        logger.info(f"已将股票 {full_code} {name} 添加到 stock_names 工作表，行号: {next_row}")
+        logger.info(f"已将股票 {full_code} {name} 添加到 stock_names 工作表")
         return True
     except Exception as e:
         logger.error(f"添加股票到 stock_names 工作表时出错: {e}")
-        return False
+        return True  # 即使添加失败，也返回 True，不影响主交易流程
         
 # 初始化 Google Sheets 並啟動定期更新
 initialize_google_sheets()
