@@ -423,68 +423,90 @@ def get_portfolio_summary(transactions=None):
         transactions = get_transactions()
         
     if not transactions:
-        return [], 0, 0, 0, 0
+        return [], 0, 0, 0, 0, 0
 
-    summary = {}
+    # 使用字典來跟踪每個股票的狀態
+    stock_status = {}
+    
     for row in transactions:
         # 提取不帶後綴的股票代碼
         code_without_suffix = row["Stock_Code"].split('.')[0]
-        if code_without_suffix not in summary:
-            summary[code_without_suffix] = {
+        full_code = row["Stock_Code"]
+        
+        if full_code not in stock_status:
+            stock_status[full_code] = {
                 "name": row["Stock_Name"],
                 "quantity": 0,
-                "total_cost": 0,
-                "buy_quantity": 0,
-                "realized_profit": 0,
-                "is_otc": row["Stock_Code"].endswith(".TWO"),
-                "full_code": row["Stock_Code"]  # 保存完整的代碼用於查詢
+                "total_buy_cost": 0,  # 總買入成本
+                "total_sell_revenue": 0,  # 總賣出收入
+                "total_fee_tax": 0,  # 總手續費和稅
+                "buy_quantity": 0,  # 總買入股數
+                "sell_quantity": 0,  # 總賣出股數
+                "realized_profit": 0,  # 已實現損益
+                "is_otc": row["Stock_Code"].endswith(".TWO")
             }
-
+        
         if row["Type"] == "Buy":
-            summary[code_without_suffix]["quantity"] += row["Quantity"]
-            summary[code_without_suffix]["total_cost"] += row["Quantity"] * row["Price"] + row["Fee"] + row["Tax"]
-            summary[code_without_suffix]["buy_quantity"] += row["Quantity"]
+            stock_status[full_code]["quantity"] += row["Quantity"]
+            stock_status[full_code]["total_buy_cost"] += row["Quantity"] * row["Price"] + row["Fee"] + row["Tax"]
+            stock_status[full_code]["buy_quantity"] += row["Quantity"]
+            stock_status[full_code]["total_fee_tax"] += row["Fee"] + row["Tax"]
         else:  # Sell
-            summary[code_without_suffix]["quantity"] -= row["Quantity"]
-            avg_buy_price = summary[code_without_suffix]["total_cost"] / summary[code_without_suffix]["buy_quantity"] if summary[code_without_suffix]["buy_quantity"] > 0 else 0
-            summary[code_without_suffix]["realized_profit"] += (row["Price"] - avg_buy_price) * row["Quantity"] - row["Fee"] - row["Tax"]
+            stock_status[full_code]["quantity"] -= row["Quantity"]
+            stock_status[full_code]["total_sell_revenue"] += row["Quantity"] * row["Price"] - row["Fee"] - row["Tax"]
+            stock_status[full_code]["sell_quantity"] += row["Quantity"]
+            stock_status[full_code]["total_fee_tax"] += row["Fee"] + row["Tax"]
+            
+            # 計算已實現損益
+            avg_buy_price = stock_status[full_code]["total_buy_cost"] / stock_status[full_code]["buy_quantity"] if stock_status[full_code]["buy_quantity"] > 0 else 0
+            realized_profit = (row["Price"] - avg_buy_price) * row["Quantity"] - row["Fee"] - row["Tax"]
+            stock_status[full_code]["realized_profit"] += realized_profit
 
     result = []
     total_cost = 0
     total_market_value = 0
     total_unrealized_profit = 0
     total_realized_profit = 0
+    total_quantity = 0
 
-    for code, data in summary.items():
-        if data["quantity"] <= 0:
-            continue
+    for full_code, data in stock_status.items():
+        code_without_suffix = full_code.split('.')[0]
         
-        # 使用完整的代碼（帶後綴）查詢股價
-        stock_info = fetch_stock_info(data["full_code"])
-        current_price = stock_info["price"]
+        # 獲取當前股價（只有當持有股數大於0時才需要）
+        current_price = 0
+        if data["quantity"] > 0:
+            stock_info = fetch_stock_info(full_code)
+            current_price = stock_info["price"]
+        
+        # 計算市值和未實現損益
         market_value = data["quantity"] * current_price
-        avg_buy_price = data["total_cost"] / data["buy_quantity"] if data["buy_quantity"] > 0 else 0
+        avg_buy_price = data["total_buy_cost"] / data["buy_quantity"] if data["buy_quantity"] > 0 else 0
         unrealized_profit = (current_price - avg_buy_price) * data["quantity"] if data["quantity"] > 0 else 0
         
-        total_cost += data["total_cost"]
+        # 計算總成本（只計算當前持有的部分）
+        current_cost = avg_buy_price * data["quantity"] if data["quantity"] > 0 else 0
+        
+        # 累加總計
+        total_quantity += data["quantity"]
+        total_cost += current_cost
         total_market_value += market_value
         total_unrealized_profit += unrealized_profit
         total_realized_profit += data["realized_profit"]
 
         result.append({
-            "Stock_Code": code,  # 不帶後綴的代碼，用於顯示
+            "Stock_Code": code_without_suffix,  # 不帶後綴的代碼，用於顯示
             "Stock_Name": data["name"],
             "Quantity": int(data["quantity"]),
             "Avg_Buy_Price": round(avg_buy_price, 2),
             "Current_Price": round(current_price, 2),
-            "Total_Cost": int(data["total_cost"]),
+            "Total_Cost": int(current_cost),
             "Market_Value": int(market_value),
             "Unrealized_Profit": int(unrealized_profit),
             "Realized_Profit": int(data["realized_profit"]),
-            "Full_Code": data["full_code"]  # 保存完整代碼供其他用途
+            "Full_Code": full_code  # 保存完整代碼供其他用途
         })
 
-    return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
+    return result, total_quantity, total_cost, total_market_value, total_unrealized_profit, total_realized_profit
 
 # 主頁面路由
 @app.route("/", methods=["GET", "POST"])
@@ -498,7 +520,7 @@ def index():
 
     # 獲取交易數據和投資組合摘要
     transactions = get_transactions()
-    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+    summary, total_quantity, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
 
     if request.method == "POST":
         action = request.form.get("action")
@@ -553,7 +575,7 @@ def index():
                             
                             # 重新獲取交易數據
                             transactions = get_transactions()
-                            summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+                            summary, total_quantity, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
                         else:
                             error = "無法將交易添加到 Google Sheets"
                     else:
@@ -577,7 +599,7 @@ def index():
                         fetch_stock_info.cache = {}
                     
                     # 重新计算投资组合摘要
-                    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+                    summary, total_quantity, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
                     
                     update_all_prices_message = "所有股價已更新！"
                     logger.info("已强制更新所有股价")
@@ -592,6 +614,7 @@ def index():
         "index.html",
         transactions=transactions,
         summary=summary,
+        total_quantity=total_quantity,
         total_cost=total_cost,
         total_market_value=total_market_value,
         total_unrealized_profit=total_unrealized_profit,
