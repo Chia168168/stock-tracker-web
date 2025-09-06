@@ -121,15 +121,15 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
         ])
         
         # 如果是買入交易，檢查並添加股票到 stock_names 工作表
-        if transaction["Type"] == "Buy":
-            # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
-            stock_code = transaction["Stock_Code"].split('.')[0]
-            
-            # 檢查股票是否已存在於 stock_names 工作表
-            if not check_stock_exists_in_names(client, sheet_name, stock_code):
-                # 添加新股票到 stock_names 工作表
-                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
-        
+        # 在 add_transaction_to_google_sheet 函數中
+if transaction["Type"] == "Buy":
+    # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
+    stock_code = transaction["Stock_Code"].split('.')[0]
+    
+    # 檢查股票是否已存在於 stock_names 工作表
+    if not check_stock_exists_in_names(client, sheet_name, stock_code):
+        # 添加新股票到 stock_names 工作表
+        add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
         return True
     except Exception as e:
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
@@ -515,13 +515,17 @@ def export_transactions():
         return redirect(url_for("index"))
 
 # 檢查股票是否存在於 stock_names 工作表
+# 檢查股票是否存在於 stock_names 工作表
 def check_stock_exists_in_names(client, sheet_name, code):
     try:
         stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         records = stock_names_sheet.get_all_records()
         
+        # 使用帶有 .TW 後綴的代碼進行檢查
+        code_with_suffix = f"{code}.TW"
+        
         for record in records:
-            if str(record.get('code', '')) == str(code):
+            if str(record.get('code', '')) == code_with_suffix:
                 return True
         return False
     except gspread.exceptions.WorksheetNotFound:
@@ -531,6 +535,7 @@ def check_stock_exists_in_names(client, sheet_name, code):
         return False
 
 # 添加新股票到 stock_names 工作表
+# 添加新股票到 stock_names 工作表
 def add_stock_to_names_sheet(client, sheet_name, code, name):
     try:
         # 嘗試獲取 stock_names 工作表，如果不存在則創建
@@ -538,25 +543,30 @@ def add_stock_to_names_sheet(client, sheet_name, code, name):
             stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         except gspread.exceptions.WorksheetNotFound:
             stock_names_sheet = client.open(sheet_name).add_worksheet(title="stock_names", rows=1000, cols=10)
-            # 添加標題行
-            stock_names_sheet.append_row(["code", "name", "price", "pricenow"])
+            # 添加標題行，注意順序：code, price, name, pricenow
+            stock_names_sheet.append_row(["code", "price", "name", "pricenow"])
         
         # 獲取當前行數
         records = stock_names_sheet.get_all_values()
         next_row = len(records) + 1
         
-        # 構建公式
-        formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{code}","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
+        # 構建公式 - 移除前面的 ' 符號
+        formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{code}.TW","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
         
-        # 添加新行
-        stock_names_sheet.append_row([code, name, f'=D{next_row}', formula])
+        # 添加新行，注意順序：code, price, name, pricenow
+        # price 欄位使用公式 =D{next_row}，指向 pricenow 欄位
+        stock_names_sheet.append_row([
+            f"{code}.TW",  # 代碼加上 .TW 後綴
+            f'=D{next_row}',  # price 欄位指向 pricenow
+            name,  # 股票名稱
+            formula  # pricenow 欄位使用 IMPORTXML 公式
+        ])
         
-        logger.info(f"已將股票 {code} {name} 添加到 stock_names 工作表")
+        logger.info(f"已將股票 {code}.TW {name} 添加到 stock_names 工作表")
         return True
     except Exception as e:
         logger.error(f"添加股票到 stock_names 工作表時出錯: {e}")
         return False
-
 # 初始化 Google Sheets 並啟動定期更新
 initialize_google_sheets()
 schedule_google_sheets_update(30)  # 每30分鐘更新一次
