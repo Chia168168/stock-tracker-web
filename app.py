@@ -681,7 +681,7 @@ def fetch_stock_name():
     logger.info(f"收到查詢請求: 代碼={code}, 市場={market}")
     
     if not code:
-        response = jsonify({"error": "請輸入股票代碼")
+        response = jsonify({"error": "請輸入股票代碼"})  # 修正這裡，添加缺失的 }
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
     
