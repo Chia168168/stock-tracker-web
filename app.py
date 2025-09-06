@@ -157,6 +157,25 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
         return False
 
+# 從 Google Sheets 刪除交易
+def delete_transaction_from_google_sheet(client, sheet_name, worksheet_name, transaction_index):
+    try:
+        # 打開試算表
+        sheet = client.open(sheet_name).worksheet(worksheet_name)
+        
+        # 刪除指定行（行號從1開始，標題行是第一行，所以交易數據從第2行開始）
+        # transaction_index 是交易列表中的索引，需要轉換為Google Sheets中的行號
+        row_number = transaction_index + 2  # +2 是因為標題行(1)和0-based索引
+        
+        # 刪除行
+        sheet.delete_rows(row_number)
+        
+        logger.info(f"已刪除交易，行號: {row_number}")
+        return True
+    except Exception as e:
+        logger.error(f"從 Google Sheets 刪除交易時出錯: {e}")
+        return False
+
 # 檢查股票是否存在於 stock_names 工作表
 def check_stock_exists_in_names(client, sheet_name, full_code):
     try:
@@ -334,7 +353,7 @@ def load_stock_names():
                 df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
             except UnicodeDecodeError:
                 logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
-                return {}
+            return {}
         expected_columns = ["Code", "Name", "Market"]
         if list(df.columns) != expected_columns:
             logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
@@ -517,6 +536,7 @@ def index():
     default_date = datetime.now().strftime("%Y-%m-%d")
     add_transaction_message = None
     update_all_prices_message = None
+    delete_transaction_message = None
 
     # 獲取交易數據和投資組合摘要
     transactions = get_transactions()
@@ -608,6 +628,32 @@ def index():
             except Exception as e:
                 error = f"更新股價時出錯: {str(e)}"
                 logger.error(f"更新所有股價失敗: {e}")
+        
+        elif action == "delete_transaction":
+            try:
+                transaction_index = request.form.get("transaction_index")
+                if transaction_index is not None:
+                    transaction_index = int(transaction_index)
+                    
+                    client = setup_google_sheets()
+                    if client:
+                        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+                        if delete_transaction_from_google_sheet(client, sheet_name, "交易紀錄", transaction_index):
+                            # 清除交易緩存
+                            global TRANSACTIONS_CACHE
+                            TRANSACTIONS_CACHE = None
+                            delete_transaction_message = "交易已刪除！"
+                            
+                            # 重新獲取交易數據
+                            transactions = get_transactions()
+                            summary, total_quantity, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+                        else:
+                            error = "無法從 Google Sheets 刪除交易"
+                    else:
+                        error = "無法連接到 Google Sheets"
+            except Exception as e:
+                error = f"刪除交易時發生錯誤: {str(e)}"
+                logger.error(f"刪除交易失敗: {e}")
 
     # 渲染模板（適用於 GET 和 POST 請求）
     return render_template(
@@ -623,7 +669,8 @@ def index():
         stock_name=stock_name,
         default_date=default_date,
         add_transaction_message=add_transaction_message,
-        update_all_prices_message=update_all_prices_message
+        update_all_prices_message=update_all_prices_message,
+        delete_transaction_message=delete_transaction_message
     )
 
 # 獲取股票名稱
@@ -634,7 +681,7 @@ def fetch_stock_name():
     logger.info(f"收到查詢請求: 代碼={code}, 市場={market}")
     
     if not code:
-        response = jsonify({"error": "請輸入股票代碼"})
+        response = jsonify({"error": "請輸入股票代碼")
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
     
