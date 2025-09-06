@@ -147,6 +147,7 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
         return False
         
 # 在應用啟動時初始化 Google Sheets 連接
+# 在 initialize_google_sheets 函數中添加價格讀取
 def initialize_google_sheets():
     try:
         client = setup_google_sheets()
@@ -172,6 +173,9 @@ def initialize_google_sheets():
                 # 添加標題行
                 stock_names_sheet.append_row(["code", "name", "price", "pricenow"])
             
+            # 新增：讀取價格數據
+            get_prices_from_google_sheet(client, sheet_name, "stock_names")
+            
             return True
         return False
     except Exception as e:
@@ -179,12 +183,17 @@ def initialize_google_sheets():
         return False
 
 # 定期更新 Google Sheets 數據
-def schedule_google_sheets_update(interval_minutes=30):  # 改為每30分鐘更新一次
+# 修改定期更新函數，確保也更新價格數據
+def schedule_google_sheets_update(interval_minutes=30):
     def update():
         while True:
             try:
                 time.sleep(interval_minutes * 60)
-                initialize_google_sheets()  # 修正函數名稱
+                client = setup_google_sheets()
+                if client:
+                    sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+                    get_prices_from_google_sheet(client, sheet_name, "stock_names")
+                    logger.info("已更新 Google Sheets 價格數據")
             except Exception as e:
                 logger.error(f"定期更新 Google Sheets 數據時出錯: {e}")
     
@@ -255,17 +264,25 @@ def load_stock_names():
         return {}
 
 # Fetch stock info - 使用 Google Sheets 數據
+# 修改 fetch_stock_info 函數，確保有默認的 google_sheets_prices 屬性
 def fetch_stock_info(code, is_otc=False):
+    # 確保 google_sheets_prices 屬性存在
+    if not hasattr(fetch_stock_info, 'google_sheets_prices'):
+        fetch_stock_info.google_sheets_prices = {}
+    
+    # 確保緩存存在
+    if not hasattr(fetch_stock_info, 'cache'):
+        fetch_stock_info.cache = {}
+    
     # 使用緩存來減少 API 請求
     cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
     current_time = time.time()
     
     # 檢查緩存是否存在且未過期（30分鐘）
-    if hasattr(fetch_stock_info, 'cache'):
-        cached_data = fetch_stock_info.cache.get(cache_key)
-        if cached_data and current_time - cached_data['timestamp'] < 1800:  # 30分鐘緩存
-            logger.info(f"使用緩存的股票數據: {cache_key}")
-            return cached_data['data']
+    cached_data = fetch_stock_info.cache.get(cache_key)
+    if cached_data and current_time - cached_data['timestamp'] < 1800:  # 30分鐘緩存
+        logger.info(f"使用緩存的股票數據: {cache_key}")
+        return cached_data['data']
     
     # 從本地 CSV 獲取股票名稱
     stock_names = load_stock_names()
@@ -274,17 +291,25 @@ def fetch_stock_info(code, is_otc=False):
     
     # 嘗試從 Google Sheets 獲取價格
     price = 0
-    if hasattr(fetch_stock_info, 'google_sheets_prices'):
+    if fetch_stock_info.google_sheets_prices:
         price = fetch_stock_info.google_sheets_prices.get(str(code), 0)
     
-    # 如果 Google Sheets 沒有數據，使用默認值而不是嘗試 Yahoo Finance
-    # 因為 Yahoo Finance 在 Render 環境中不可靠
+    # 如果 Google Sheets 沒有數據，嘗試使用 Yahoo Finance
+    if price == 0:
+        try:
+            ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="1d")
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+                logger.info(f"從 Yahoo Finance 獲取 {ticker} 價格: {price}")
+        except Exception as e:
+            logger.error(f"從 Yahoo Finance 獲取 {ticker} 價格失敗: {e}")
+            price = 0
     
     result = {"price": round(price, 2), "name": name}
     
     # 更新緩存
-    if not hasattr(fetch_stock_info, 'cache'):
-        fetch_stock_info.cache = {}
     fetch_stock_info.cache[cache_key] = {
         'timestamp': current_time,
         'data': result
