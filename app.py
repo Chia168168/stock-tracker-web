@@ -353,7 +353,7 @@ def load_stock_names():
                 df = pd.read_csv(STOCK_NAMES_FILE, encoding='big5')
             except UnicodeDecodeError:
                 logger.error("無法以 utf-8-sig 或 big5 編碼讀取 stock_names.csv，請檢查檔案編碼")
-            return {}
+                return {}
         expected_columns = ["Code", "Name", "Market"]
         if list(df.columns) != expected_columns:
             logger.error(f"{STOCK_NAMES_FILE} 格式錯誤，應包含欄位: {expected_columns}")
@@ -530,6 +530,8 @@ def get_portfolio_summary(transactions=None):
 # 主頁面路由
 @app.route("/", methods=["GET", "POST"])
 def index():
+    global TRANSACTIONS_CACHE
+    
     initialize_google_sheets()
     error = None
     stock_name = None
@@ -589,7 +591,6 @@ def index():
                         sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
                         if add_transaction_to_google_sheet(client, sheet_name, "交易紀錄", new_transaction):
                             # 清除交易緩存
-                            global TRANSACTIONS_CACHE
                             TRANSACTIONS_CACHE = None
                             add_transaction_message = "交易已新增！"
                             
@@ -640,7 +641,6 @@ def index():
                         sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
                         if delete_transaction_from_google_sheet(client, sheet_name, "交易紀錄", transaction_index):
                             # 清除交易緩存
-                            global TRANSACTIONS_CACHE
                             TRANSACTIONS_CACHE = None
                             delete_transaction_message = "交易已刪除！"
                             
@@ -681,7 +681,7 @@ def fetch_stock_name():
     logger.info(f"收到查詢請求: 代碼={code}, 市場={market}")
     
     if not code:
-        response = jsonify({"error": "請輸入股票代碼"})  # 修正這裡，添加缺失的 }
+        response = jsonify({"error": "請輸入股票代碼"})
         response.headers["Content-Type"] = "application/json; charset=utf-8"
         return response
     
