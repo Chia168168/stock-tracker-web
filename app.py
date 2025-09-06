@@ -52,6 +52,7 @@ def setup_google_sheets():
 
 # 從 Google Sheets 讀取股票價格
 # 修改 get_prices_from_google_sheet 函數，確保正確處理代碼
+# 修改 get_prices_from_google_sheet 函数，确保它总是返回最新的价格
 def get_prices_from_google_sheet(client, sheet_name, worksheet_name="stock_names"):
     try:
         # 打開試算表
@@ -74,12 +75,19 @@ def get_prices_from_google_sheet(client, sheet_name, worksheet_name="stock_names
                     # 嘗試轉換為浮點數，如果失敗則跳過
                     price_value = float(row['price'])
                     prices[code] = price_value
-                except (ValueError, TypeError):
+                    logger.debug(f"從 Google Sheets 讀取股票價格: {code} = {price_value}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"無法解析價格數據: {row}, 錯誤: {e}")
                     continue
         
         # 設置全局緩存
-        fetch_stock_info.google_sheets_prices = prices
+        if hasattr(fetch_stock_info, 'google_sheets_prices'):
+            fetch_stock_info.google_sheets_prices = prices
+        else:
+            # 確保屬性存在
+            fetch_stock_info.google_sheets_prices = prices
             
+        logger.info(f"已從 Google Sheets 讀取 {len(prices)} 個股票價格")
         return prices
     except Exception as e:
         logger.error(f"從 Google Sheets 讀取數據時出錯: {e}")
@@ -400,6 +408,7 @@ def get_portfolio_summary(transactions=None):
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
     
+# 在 index 路由中添加处理 "update_all_prices" 动作的逻辑
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_google_sheets()
@@ -407,6 +416,7 @@ def index():
     stock_name = None
     default_date = datetime.now().strftime("%Y-%m-%d")
     add_transaction_message = None
+    update_all_prices_message = None
 
     # 獲取交易數據和投資組合摘要
     transactions = get_transactions()
@@ -416,67 +426,47 @@ def index():
         action = request.form.get("action")
         
         if action == "add_transaction":
+            # 原有的新增交易逻辑...
+            pass
+        
+        elif action == "update_all_prices":
             try:
-                date = request.form.get("date", default_date)
-                code = request.form.get("code", "").strip()
-                name = request.form.get("name", "").strip() or "未知股票"
-                market = request.form.get("market", "TWSE")
-                trans_type = request.form.get("type", "Buy")
-                quantity = request.form.get("quantity")
-                price = request.form.get("price")
-                
-                # Validate inputs
-                if not code:
-                    error = "股票代碼不能為空"
-                elif not quantity or float(quantity) <= 0:
-                    error = "股數必須為正數"
-                elif float(quantity) % 1000 != 0:
-                    error = "股數必須為1000的倍數"
-                elif not price or float(price) <= 0:
-                    error = "每股價格必須為正數"
-                else:
-                    quantity = float(quantity)
-                    price = float(price)
-                    # 自動計算手續費和交易稅
-                    fee = max(20, price * quantity * 0.001425)
-                    tax = price * quantity * 0.003 if trans_type == "Sell" else 0
-
-                    code_with_suffix = f"{code}.TWO" if market == "TWO" else f"{code}.TW"
-                    new_transaction = {
-                        "Date": date,
-                        "Stock_Code": code_with_suffix,
-                        "Stock_Name": name,
-                        "Type": trans_type,
-                        "Quantity": quantity,
-                        "Price": price,
-                        "Fee": fee,
-                        "Tax": tax
-                    }
+                client = setup_google_sheets()
+                if client:
+                    sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
+                    # 强制重新从 Google Sheets 读取价格数据
+                    get_prices_from_google_sheet(client, sheet_name, "stock_names")
                     
-                    # 添加到 Google Sheets
-                    client = setup_google_sheets()
-                    if client:
-                        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
-                        if add_transaction_to_google_sheet(client, sheet_name, "交易紀錄", new_transaction):
-                            # 清除交易緩存
-                            global TRANSACTIONS_CACHE
-                            TRANSACTIONS_CACHE = None
-                            add_transaction_message = "交易已新增！"
-                            
-                            # 如果是買入交易，顯示額外訊息
-                            if trans_type == "Buy":
-                                add_transaction_message += " 已檢查並更新股票列表。"
-                            
-                            # 重新獲取交易數據
-                            transactions = get_transactions()
-                            summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
-                        else:
-                            error = "無法將交易添加到 Google Sheets"
-                    else:
-                        error = "無法連接到 Google Sheets"
-            except ValueError as e:
-                error = f"輸入無效: {str(e)}。請確保股數和價格為有效數字"
+                    # 清除股票信息缓存，强制重新获取所有股票的最新价格
+                    if hasattr(fetch_stock_info, 'cache'):
+                        fetch_stock_info.cache = {}
+                    
+                    # 重新计算投资组合摘要
+                    summary, total_cost, total_market_value, total_unrealized_profit, total_realized_profit = get_portfolio_summary(transactions)
+                    
+                    update_all_prices_message = "所有股價已更新！"
+                    logger.info("已强制更新所有股价")
+                else:
+                    error = "無法連接到 Google Sheets"
+            except Exception as e:
+                error = f"更新股價時出錯: {str(e)}"
+                logger.error(f"更新所有股價失敗: {e}")
 
+    # 渲染模板（適用於 GET 和 POST 請求）
+    return render_template(
+        "index.html",
+        transactions=transactions,
+        summary=summary,
+        total_cost=total_cost,
+        total_market_value=total_market_value,
+        total_unrealized_profit=total_unrealized_profit,
+        total_realized_profit=total_realized_profit,
+        error=error,
+        stock_name=stock_name,
+        default_date=default_date,
+        add_transaction_message=add_transaction_message,
+        update_all_prices_message=update_all_prices_message  # 添加这个变量
+    )
     # 渲染模板（適用於 GET 和 POST 請求）
     return render_template(
         "index.html",
