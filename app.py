@@ -482,6 +482,7 @@ def index():
         add_transaction_message=add_transaction_message
     )
         # 其餘的 POST 處理邏輯保持不變...
+# 修改 fetch_stock_name 函数，正确处理债券代码和OTC市场
 @app.route("/fetch_stock_name", methods=["POST"])
 def fetch_stock_name():
     code = request.form.get("code", "").strip()
@@ -513,6 +514,15 @@ def fetch_stock_name():
     
     name = stock_names.get(name_key, "")
     
+    # 特殊处理：对于债券代码，可能需要不同的查找方式
+    if not name and code.endswith('B') and market == "TWO":
+        # 尝试去掉债券标识 'B' 再查找
+        code_without_b = code.rstrip('B')
+        name_key_without_b = (code_without_b, market_key)
+        name = stock_names.get(name_key_without_b, "")
+        if name:
+            logger.info(f"找到去掉債券標識後的名稱: {name}")
+    
     if not name:
         # 嘗試不區分市場查找
         for key, value in stock_names.items():
@@ -532,6 +542,42 @@ def fetch_stock_name():
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
 
+# 修改 add_transaction_to_google_sheet 函数，正确处理债券代码
+def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transaction):
+    try:
+        # 打開試算表
+        sheet = client.open(sheet_name).worksheet(worksheet_name)
+        
+        # 獲取現有數據以確定新行的位置
+        existing_data = sheet.get_all_values()
+        next_row = len(existing_data) + 1 if existing_data else 2  # 標題行佔用第1行
+        
+        # 添加新交易
+        sheet.append_row([
+            transaction["Date"],
+            transaction["Stock_Code"],
+            transaction["Stock_Name"],
+            transaction["Type"],
+            transaction["Quantity"],
+            transaction["Price"],
+            transaction["Fee"],
+            transaction["Tax"]
+        ])
+        
+        # 如果是買入交易，檢查並添加股票到 stock_names 工作表
+        if transaction["Type"] == "Buy":
+            # 提取股票代碼（保留完整代码，包括后缀）
+            stock_code = transaction["Stock_Code"]
+            
+            # 檢查股票是否已存在於 stock_names 工作表
+            if not check_stock_exists_in_names(client, sheet_name, stock_code):
+                # 添加新股票到 stock_names 工作表
+                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
+        
+        return True
+    except Exception as e:
+        logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
+        return False
 @app.route("/export_transactions")
 def export_transactions():
     try:
@@ -560,14 +606,15 @@ def export_transactions():
         return redirect(url_for("index"))
 
 # 檢查股票是否存在於 stock_names 工作表
-def check_stock_exists_in_names(client, sheet_name, code):
+# 修改 check_stock_exists_in_names 函数，正确处理债券代码
+def check_stock_exists_in_names(client, sheet_name, full_code):
     try:
         stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         records = stock_names_sheet.get_all_values()
         
         # 检查所有记录，查找匹配的代码
         for row in records:
-            if len(row) > 0 and row[0] == f"{code}.TW":  # 第一列是代码
+            if len(row) > 0 and row[0] == full_code:  # 直接比较完整代码
                 return True
         return False
     except gspread.exceptions.WorksheetNotFound:
@@ -577,7 +624,8 @@ def check_stock_exists_in_names(client, sheet_name, code):
         return False
 
 # 添加新股票到 stock_names 工作表
-def add_stock_to_names_sheet(client, sheet_name, code, name):
+# 修改 add_stock_to_names_sheet 函数，正确处理债券代码
+def add_stock_to_names_sheet(client, sheet_name, full_code, name):
     try:
         # 尝试获取 stock_names 工作表，如果不存在则创建
         try:
@@ -600,13 +648,19 @@ def add_stock_to_names_sheet(client, sheet_name, code, name):
             stock_names_sheet.add_rows(100)
         
         # 构建您指定的公式
-        formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/"&A{next_row}&"","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
+        # 对于债券代码，可能需要不同的Yahoo Finance URL结构
+        if full_code.endswith('.TWO'):
+            # 上櫃股票（包括债券）
+            formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{full_code.replace(".TWO", ".TWO")}","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
+        else:
+            # 上市股票
+            formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{full_code.replace(".TW", "")}.TW","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
         
         # 使用批量更新并指定 value_input_option 为 USER_ENTERED 来避免单引号问题
         batch_data = [
             {
                 'range': f'A{next_row}',
-                'values': [[f"{code}.TW"]]
+                'values': [[full_code]]
             },
             {
                 'range': f'B{next_row}',
@@ -625,7 +679,7 @@ def add_stock_to_names_sheet(client, sheet_name, code, name):
         # 执行批量更新，使用 USER_ENTERED 选项
         stock_names_sheet.batch_update(batch_data, value_input_option='USER_ENTERED')
         
-        logger.info(f"已将股票 {code}.TW {name} 添加到 stock_names 工作表，行号: {next_row}")
+        logger.info(f"已将股票 {full_code} {name} 添加到 stock_names 工作表，行号: {next_row}")
         return True
     except Exception as e:
         logger.error(f"添加股票到 stock_names 工作表时出错: {e}")
