@@ -120,32 +120,19 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
             transaction["Tax"]
         ])
         
+        # 如果是買入交易，檢查並添加股票到 stock_names 工作表
+        if transaction["Type"] == "Buy":
+            # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
+            stock_code = transaction["Stock_Code"].split('.')[0]
+            
+            # 檢查股票是否已存在於 stock_names 工作表
+            if not check_stock_exists_in_names(client, sheet_name, stock_code):
+                # 添加新股票到 stock_names 工作表
+                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
+        
         return True
     except Exception as e:
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
-        return False
-
-# 初始化 Google Sheets
-def initialize_google_sheets():
-    try:
-        client = setup_google_sheets()
-        if client:
-            # 從環境變量獲取試算表名稱
-            sheet_name = os.environ.get('GOOGLE_SHEET_NAME', '股票投資管理')
-            
-            # 檢查交易紀錄工作表是否存在，如果不存在則創建
-            try:
-                sheet = client.open(sheet_name).worksheet("交易紀錄")
-            except gspread.exceptions.WorksheetNotFound:
-                # 創建交易紀錄工作表
-                sheet = client.open(sheet_name).add_worksheet(title="交易紀錄", rows=1000, cols=20)
-                # 添加標題行
-                sheet.append_row(["Date", "Stock_Code", "Stock_Name", "Type", "Quantity", "Price", "Fee", "Tax"])
-            
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"初始化 Google Sheets 時出錯: {e}")
         return False
 
 # 在應用啟動時初始化 Google Sheets 連接
@@ -179,13 +166,14 @@ def initialize_google_sheets():
     except Exception as e:
         logger.error(f"初始化 Google Sheets 時出錯: {e}")
         return False
+
 # 定期更新 Google Sheets 數據
 def schedule_google_sheets_update(interval_minutes=30):  # 改為每30分鐘更新一次
     def update():
         while True:
             try:
                 time.sleep(interval_minutes * 60)
-                init_google_sheets()
+                initialize_google_sheets()  # 修正函數名稱
             except Exception as e:
                 logger.error(f"定期更新 Google Sheets 數據時出錯: {e}")
     
@@ -562,46 +550,8 @@ def add_stock_to_names_sheet(client, sheet_name, code, name):
         logger.error(f"添加股票到 stock_names 工作表時出錯: {e}")
         return False
 
-# 修改 add_transaction_to_google_sheet 函數以包含股票檢查
-def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transaction):
-    try:
-        # 打開試算表
-        sheet = client.open(sheet_name).worksheet(worksheet_name)
-        
-        # 獲取現有數據以確定新行的位置
-        existing_data = sheet.get_all_values()
-        next_row = len(existing_data) + 1 if existing_data else 2  # 標題行佔用第1行
-        
-        # 添加新交易
-        sheet.append_row([
-            transaction["Date"],
-            transaction["Stock_Code"],
-            transaction["Stock_Name"],
-            transaction["Type"],
-            transaction["Quantity"],
-            transaction["Price"],
-            transaction["Fee"],
-            transaction["Tax"]
-        ])
-        
-        # 如果是買入交易，檢查並添加股票到 stock_names 工作表
-        if transaction["Type"] == "Buy":
-            # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
-            stock_code = transaction["Stock_Code"].split('.')[0]
-            
-            # 檢查股票是否已存在於 stock_names 工作表
-            if not check_stock_exists_in_names(client, sheet_name, stock_code):
-                # 添加新股票到 stock_names 工作表
-                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
-        
-        return True
-    except Exception as e:
-        logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
-        return False
-
-# 初始化 Google Sheets
-init_google_sheets()
-# 啟動定期更新
+# 初始化 Google Sheets 並啟動定期更新
+initialize_google_sheets()
 schedule_google_sheets_update(30)  # 每30分鐘更新一次
 
 if __name__ == "__main__":
