@@ -51,6 +51,7 @@ def setup_google_sheets():
         return None
 
 # 從 Google Sheets 讀取股票價格
+# 修改 get_prices_from_google_sheet 函數，確保正確處理代碼
 def get_prices_from_google_sheet(client, sheet_name, worksheet_name="stock_names"):
     try:
         # 打開試算表
@@ -64,17 +65,20 @@ def get_prices_from_google_sheet(client, sheet_name, worksheet_name="stock_names
         for row in data:
             if 'code' in row and 'price' in row:
                 try:
+                    # 確保代碼格式正確（帶有.TW或.TWO後綴）
+                    code = str(row['code'])
+                    # 如果代碼不包含後綴，嘗試添加.TW後綴
+                    if not code.endswith(('.TW', '.TWO')):
+                        code += '.TW'
+                    
                     # 嘗試轉換為浮點數，如果失敗則跳過
                     price_value = float(row['price'])
-                    prices[str(row['code'])] = price_value
+                    prices[code] = price_value
                 except (ValueError, TypeError):
                     continue
         
         # 設置全局緩存
-        if hasattr(fetch_stock_info, 'google_sheets_prices'):
-            fetch_stock_info.google_sheets_prices = prices
-        else:
-            fetch_stock_info.google_sheets_prices = prices
+        fetch_stock_info.google_sheets_prices = prices
             
         return prices
     except Exception as e:
@@ -265,7 +269,18 @@ def load_stock_names():
 
 # Fetch stock info - 使用 Google Sheets 數據
 # 修改 fetch_stock_info 函數，確保有默認的 google_sheets_prices 屬性
-def fetch_stock_info(code, is_otc=False):
+# 修改 fetch_stock_info 函數，使用完整代碼（帶後綴）查詢
+def fetch_stock_info(full_code):
+    # 從完整代碼中提取基本信息
+    if full_code.endswith(".TWO"):
+        code = full_code.split('.')[0]
+        is_otc = True
+        market_key = "TWO"
+    else:
+        code = full_code.split('.')[0]
+        is_otc = False
+        market_key = "TWSE"
+    
     # 確保 google_sheets_prices 屬性存在
     if not hasattr(fetch_stock_info, 'google_sheets_prices'):
         fetch_stock_info.google_sheets_prices = {}
@@ -275,7 +290,7 @@ def fetch_stock_info(code, is_otc=False):
         fetch_stock_info.cache = {}
     
     # 使用緩存來減少 API 請求
-    cache_key = f"{code}_{'TWO' if is_otc else 'TW'}"
+    cache_key = full_code
     current_time = time.time()
     
     # 檢查緩存是否存在且未過期（30分鐘）
@@ -286,25 +301,24 @@ def fetch_stock_info(code, is_otc=False):
     
     # 從本地 CSV 獲取股票名稱
     stock_names = load_stock_names()
-    name_key = (str(code), "TWO" if is_otc else "TWSE")
+    name_key = (str(code), market_key)
     name = stock_names.get(name_key, "未知名稱")
     
-    # 嘗試從 Google Sheets 獲取價格
+    # 嘗試從 Google Sheets 獲取價格 - 使用完整代碼（帶後綴）
     price = 0
     if fetch_stock_info.google_sheets_prices:
-        price = fetch_stock_info.google_sheets_prices.get(str(code), 0)
+        price = fetch_stock_info.google_sheets_prices.get(full_code, 0)
     
     # 如果 Google Sheets 沒有數據，嘗試使用 Yahoo Finance
     if price == 0:
         try:
-            ticker = f"{code}.TWO" if is_otc else f"{code}.TW"
-            stock = yf.Ticker(ticker)
+            stock = yf.Ticker(full_code)
             hist = stock.history(period="1d")
             if not hist.empty:
                 price = hist["Close"].iloc[-1]
-                logger.info(f"從 Yahoo Finance 獲取 {ticker} 價格: {price}")
+                logger.info(f"從 Yahoo Finance 獲取 {full_code} 價格: {price}")
         except Exception as e:
-            logger.error(f"從 Yahoo Finance 獲取 {ticker} 價格失敗: {e}")
+            logger.error(f"從 Yahoo Finance 獲取 {full_code} 價格失敗: {e}")
             price = 0
     
     result = {"price": round(price, 2), "name": name}
@@ -316,8 +330,8 @@ def fetch_stock_info(code, is_otc=False):
     }
     
     return result
-
 # Calculate portfolio summary
+# 修改 get_portfolio_summary 函數，在顯示時去掉後綴
 def get_portfolio_summary(transactions=None):
     if transactions is None:
         transactions = get_transactions()
@@ -327,25 +341,27 @@ def get_portfolio_summary(transactions=None):
 
     summary = {}
     for row in transactions:
-        code = row["Stock_Code"]
-        if code not in summary:
-            summary[code] = {
+        # 提取不帶後綴的股票代碼
+        code_without_suffix = row["Stock_Code"].split('.')[0]
+        if code_without_suffix not in summary:
+            summary[code_without_suffix] = {
                 "name": row["Stock_Name"],
                 "quantity": 0,
                 "total_cost": 0,
                 "buy_quantity": 0,
                 "realized_profit": 0,
-                "is_otc": row["Stock_Code"].endswith(".TWO")
+                "is_otc": row["Stock_Code"].endswith(".TWO"),
+                "full_code": row["Stock_Code"]  # 保存完整的代碼用於查詢
             }
 
         if row["Type"] == "Buy":
-            summary[code]["quantity"] += row["Quantity"]
-            summary[code]["total_cost"] += row["Quantity"] * row["Price"] + row["Fee"] + row["Tax"]
-            summary[code]["buy_quantity"] += row["Quantity"]
+            summary[code_without_suffix]["quantity"] += row["Quantity"]
+            summary[code_without_suffix]["total_cost"] += row["Quantity"] * row["Price"] + row["Fee"] + row["Tax"]
+            summary[code_without_suffix]["buy_quantity"] += row["Quantity"]
         else:  # Sell
-            summary[code]["quantity"] -= row["Quantity"]
-            avg_buy_price = summary[code]["total_cost"] / summary[code]["buy_quantity"] if summary[code]["buy_quantity"] > 0 else 0
-            summary[code]["realized_profit"] += (row["Price"] - avg_buy_price) * row["Quantity"] - row["Fee"] - row["Tax"]
+            summary[code_without_suffix]["quantity"] -= row["Quantity"]
+            avg_buy_price = summary[code_without_suffix]["total_cost"] / summary[code_without_suffix]["buy_quantity"] if summary[code_without_suffix]["buy_quantity"] > 0 else 0
+            summary[code_without_suffix]["realized_profit"] += (row["Price"] - avg_buy_price) * row["Quantity"] - row["Fee"] - row["Tax"]
 
     result = []
     total_cost = 0
@@ -356,7 +372,9 @@ def get_portfolio_summary(transactions=None):
     for code, data in summary.items():
         if data["quantity"] <= 0:
             continue
-        stock_info = fetch_stock_info(code.split(".")[0], data["is_otc"])
+        
+        # 使用完整的代碼（帶後綴）查詢股價
+        stock_info = fetch_stock_info(data["full_code"])
         current_price = stock_info["price"]
         market_value = data["quantity"] * current_price
         avg_buy_price = data["total_cost"] / data["buy_quantity"] if data["buy_quantity"] > 0 else 0
@@ -368,7 +386,7 @@ def get_portfolio_summary(transactions=None):
         total_realized_profit += data["realized_profit"]
 
         result.append({
-            "Stock_Code": code,
+            "Stock_Code": code,  # 不帶後綴的代碼，用於顯示
             "Stock_Name": data["name"],
             "Quantity": int(data["quantity"]),
             "Avg_Buy_Price": round(avg_buy_price, 2),
@@ -376,11 +394,12 @@ def get_portfolio_summary(transactions=None):
             "Total_Cost": int(data["total_cost"]),
             "Market_Value": int(market_value),
             "Unrealized_Profit": int(unrealized_profit),
-            "Realized_Profit": int(data["realized_profit"])
+            "Realized_Profit": int(data["realized_profit"]),
+            "Full_Code": data["full_code"]  # 保存完整代碼供其他用途
         })
 
     return result, int(total_cost), int(total_market_value), int(total_unrealized_profit), int(total_realized_profit)
-
+    
 @app.route("/", methods=["GET", "POST"])
 def index():
     initialize_google_sheets()
