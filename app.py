@@ -121,20 +121,20 @@ def add_transaction_to_google_sheet(client, sheet_name, worksheet_name, transact
         ])
         
         # 如果是買入交易，檢查並添加股票到 stock_names 工作表
-        # 在 add_transaction_to_google_sheet 函數中
-if transaction["Type"] == "Buy":
-    # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
-    stock_code = transaction["Stock_Code"].split('.')[0]
-    
-    # 檢查股票是否已存在於 stock_names 工作表
-    if not check_stock_exists_in_names(client, sheet_name, stock_code):
-        # 添加新股票到 stock_names 工作表
-        add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
+        if transaction["Type"] == "Buy":
+            # 提取股票代碼（去掉 .TW 或 .TWO 後綴）
+            stock_code = transaction["Stock_Code"].split('.')[0]
+            
+            # 檢查股票是否已存在於 stock_names 工作表
+            if not check_stock_exists_in_names(client, sheet_name, stock_code):
+                # 添加新股票到 stock_names 工作表
+                add_stock_to_names_sheet(client, sheet_name, stock_code, transaction["Stock_Name"])
+        
         return True
     except Exception as e:
         logger.error(f"添加交易到 Google Sheets 時出錯: {e}")
         return False
-
+        
 # 在應用啟動時初始化 Google Sheets 連接
 def initialize_google_sheets():
     try:
