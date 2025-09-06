@@ -198,7 +198,7 @@
     </script>
 </head>
 <body>
-    <h1>TENG台灣股票投資管理 V1.0</h1>
+    <h1>TENG台灣股票投資管理 V2.0</h1>
 
     {% if error %}
         <div class="error">
@@ -317,35 +317,46 @@
         </table>
     </div>
 
-    <div>
-        <h2>交易紀錄</h2>
-        <table>
+<div>
+    <h2>交易紀錄</h2>
+    <table>
+        <tr>
+            <th>日期</th>
+            <th>股票代碼</th>
+            <th>股票名稱</th>
+            <th>類型</th>
+            <th>股數</th>
+            <th>每股價格</th>
+            <th>手續費</th>
+            <th>交易稅</th>
+            <th>操作</th>
+        </tr>
+        {% for t in transactions %}
             <tr>
-                <th>日期</th>
-                <th>股票代碼</th>
-                <th>股票名稱</th>
-                <th>類型</th>
-                <th>股數</th>
-                <th>每股價格</th>
-                <th>手續費</th>
-                <th>交易稅</th>
+                <td>{{ t.Date }}</td>
+                <td>{{ t.Stock_Code }}</td>
+                <td>{{ t.Stock_Name }}</td>
+                <td>{{ '買入' if t.Type == 'Buy' else '賣出' }}</td>
+                <td>{{ t.Quantity }}</td>
+                <td>{{ t.Price|round(2) }}</td>
+                <td>{{ t.Fee|round(2) }}</td>
+                <td>{{ t.Tax|round(2) }}</td>
+                <td>
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="action" value="delete_transaction">
+                        <input type="hidden" name="transaction_index" value="{{ loop.index0 }}">
+                        <button type="submit" style="background-color: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer;" onclick="return confirm('確定要刪除這筆交易嗎？此操作無法復原。')">刪除</button>
+                    </form>
+                </td>
             </tr>
-            {% for t in transactions %}
-                <tr>
-                    <td>{{ t.Date }}</td>
-                    <td>{{ t.Stock_Code }}</td>
-                    <td>{{ t.Stock_Name }}</td>
-                    <td>{{ '買入' if t.Type == 'Buy' else '賣出' }}</td>
-                    <td>{{ t.Quantity }}</td>
-                    <td>{{ t.Price|round(2) }}</td>
-                    <td>{{ t.Fee|round(2) }}</td>
-                    <td>{{ t.Tax|round(2) }}</td>
-                </tr>
-            {% else %}
-                <tr><td colspan="8">無交易紀錄</td></tr>
-            {% endfor %}
-        </table>
-    </div>
+        {% else %}
+            <tr><td colspan="9">無交易紀錄</td></tr>
+        {% endfor %}
+    </table>
+    {% if delete_transaction_message %}
+        <div class="success-message">{{ delete_transaction_message }}</div>
+    {% endif %}
+</div>
 
 </body>
 </html>
