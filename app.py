@@ -545,45 +545,30 @@ def check_stock_exists_in_names(client, sheet_name, code):
 # 添加新股票到 stock_names 工作表
 def add_stock_to_names_sheet(client, sheet_name, code, name):
     try:
-        # 嘗試獲取 stock_names 工作表，如果不存在則創建
+        # 尝试获取 stock_names 工作表，如果不存在则创建
         try:
             stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         except gspread.exceptions.WorksheetNotFound:
-            # 創建更大的工作表（1000 行，10 列）
+            # 创建更大的工作表（1000 行，10 列）
             stock_names_sheet = client.open(sheet_name).add_worksheet(title="stock_names", rows=1000, cols=10)
-            # 添加標題行，注意順序：code, price, name, pricenow
+            # 添加标题行，注意顺序：code, price, name, pricenow
             stock_names_sheet.append_row(["code", "price", "name", "pricenow"])
         
-        # 獲取所有記錄
+        # 获取所有记录
         records = stock_names_sheet.get_all_values()
         
-        # 找到第一個空行
+        # 找到第一个空行
         next_row = len(records) + 1
         
-        # 檢查是否超出網格限制
+        # 检查是否超出网格限制
         if next_row > stock_names_sheet.row_count:
-            # 增加行數
+            # 增加行数
             stock_names_sheet.add_rows(100)
         
-        # 使用更可靠的股價獲取方法
-        # 嘗試多種可能的 XPath 選擇器
-        xpath_options = [
-            "//fin-streamer[@data-test='qsp-price']",
-            "//span[@data-test='qsp-price']",
-            "//*[contains(@class, 'price')]",
-            "//*[contains(text(), '價')]/following-sibling::span"
-        ]
+        # 构建您指定的公式
+        formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/"&A{next_row}&"","//*[@id=\'main-0-QuoteHeader-Proxy\']/div/div[2]/div[1]/div/span[1]")'
         
-        # 構建多個可能的公式
-        formulas = []
-        for i, xpath in enumerate(xpath_options):
-            formula = f'=IFERROR(IMPORTXML("https://tw.stock.yahoo.com/quote/{code}.TW", "{xpath}"), "")'
-            formulas.append(formula)
-        
-        # 使用第一個公式作為主要公式，其他作為備用
-        main_formula = formulas[0]
-        
-        # 使用批量更新來避免單引號問題
+        # 使用批量更新并指定 value_input_option 为 USER_ENTERED 来避免单引号问题
         batch_data = [
             {
                 'range': f'A{next_row}',
@@ -599,17 +584,17 @@ def add_stock_to_names_sheet(client, sheet_name, code, name):
             },
             {
                 'range': f'D{next_row}',
-                'values': [[main_formula]]
+                'values': [[formula]]
             }
         ]
         
-        # 執行批量更新
-        stock_names_sheet.batch_update(batch_data)
+        # 执行批量更新，使用 USER_ENTERED 选项
+        stock_names_sheet.batch_update(batch_data, value_input_option='USER_ENTERED')
         
-        logger.info(f"已將股票 {code}.TW {name} 添加到 stock_names 工作表，行號: {next_row}")
+        logger.info(f"已将股票 {code}.TW {name} 添加到 stock_names 工作表，行号: {next_row}")
         return True
     except Exception as e:
-        logger.error(f"添加股票到 stock_names 工作表時出錯: {e}")
+        logger.error(f"添加股票到 stock_names 工作表时出错: {e}")
         return False
         
 # 初始化 Google Sheets 並啟動定期更新
