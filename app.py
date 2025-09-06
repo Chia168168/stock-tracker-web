@@ -51,7 +51,7 @@ def setup_google_sheets():
         return None
 
 # 從 Google Sheets 讀取股票價格
-def get_prices_from_google_sheet(client, sheet_name, worksheet_name="Sheet1"):
+def get_prices_from_google_sheet(client, sheet_name, worksheet_name="stock_names"):
     try:
         # 打開試算表
         sheet = client.open(sheet_name).worksheet(worksheet_name)
@@ -63,8 +63,19 @@ def get_prices_from_google_sheet(client, sheet_name, worksheet_name="Sheet1"):
         prices = {}
         for row in data:
             if 'code' in row and 'price' in row:
-                prices[str(row['code'])] = float(row['price'])
+                try:
+                    # 嘗試轉換為浮點數，如果失敗則跳過
+                    price_value = float(row['price'])
+                    prices[str(row['code'])] = price_value
+                except (ValueError, TypeError):
+                    continue
         
+        # 設置全局緩存
+        if hasattr(fetch_stock_info, 'google_sheets_prices'):
+            fetch_stock_info.google_sheets_prices = prices
+        else:
+            fetch_stock_info.google_sheets_prices = prices
+            
         return prices
     except Exception as e:
         logger.error(f"從 Google Sheets 讀取數據時出錯: {e}")
@@ -534,36 +545,71 @@ def check_stock_exists_in_names(client, sheet_name, code):
 # 添加新股票到 stock_names 工作表
 def add_stock_to_names_sheet(client, sheet_name, code, name):
     try:
-        # 尝试获取 stock_names 工作表，如果不存在则创建
+        # 嘗試獲取 stock_names 工作表，如果不存在則創建
         try:
             stock_names_sheet = client.open(sheet_name).worksheet("stock_names")
         except gspread.exceptions.WorksheetNotFound:
+            # 創建更大的工作表（1000 行，10 列）
             stock_names_sheet = client.open(sheet_name).add_worksheet(title="stock_names", rows=1000, cols=10)
-            # 添加标题行，注意顺序：code, price, name, pricenow
+            # 添加標題行，注意順序：code, price, name, pricenow
             stock_names_sheet.append_row(["code", "price", "name", "pricenow"])
         
-        # 获取当前行数
+        # 獲取所有記錄
         records = stock_names_sheet.get_all_values()
+        
+        # 找到第一個空行
         next_row = len(records) + 1
         
-        # 构建公式 - 使用更稳定的 XPath
-        # 尝试不同的 XPath 选择器，因为 Yahoo Finance 的页面结构可能变化
-        formula = f'=IMPORTXML("https://tw.stock.yahoo.com/quote/{code}.TW", "//fin-streamer[@data-symbol=\'{code}.TW\']")'
+        # 檢查是否超出網格限制
+        if next_row > stock_names_sheet.row_count:
+            # 增加行數
+            stock_names_sheet.add_rows(100)
         
-        # 如果上面的 XPath 不工作，尝试备用方案
-        backup_formula = f'=INDEX(IMPORTXML("https://tw.stock.yahoo.com/quote/{code}.TW", "//span"), 1)'
+        # 使用更可靠的股價獲取方法
+        # 嘗試多種可能的 XPath 選擇器
+        xpath_options = [
+            "//fin-streamer[@data-test='qsp-price']",
+            "//span[@data-test='qsp-price']",
+            "//*[contains(@class, 'price')]",
+            "//*[contains(text(), '價')]/following-sibling::span"
+        ]
         
-        # 添加新行，注意顺序：code, price, name, pricenow
-        # 使用 update_cell 而不是 append_row 来避免单引号问题
-        stock_names_sheet.update_cell(next_row, 1, f"{code}.TW")  # A列: code
-        stock_names_sheet.update_cell(next_row, 2, f'=D{next_row}')  # B列: price (指向 D列)
-        stock_names_sheet.update_cell(next_row, 3, name)  # C列: name
-        stock_names_sheet.update_cell(next_row, 4, formula)  # D列: pricenow (公式)
+        # 構建多個可能的公式
+        formulas = []
+        for i, xpath in enumerate(xpath_options):
+            formula = f'=IFERROR(IMPORTXML("https://tw.stock.yahoo.com/quote/{code}.TW", "{xpath}"), "")'
+            formulas.append(formula)
         
-        logger.info(f"已将股票 {code}.TW {name} 添加到 stock_names 工作表")
+        # 使用第一個公式作為主要公式，其他作為備用
+        main_formula = formulas[0]
+        
+        # 使用批量更新來避免單引號問題
+        batch_data = [
+            {
+                'range': f'A{next_row}',
+                'values': [[f"{code}.TW"]]
+            },
+            {
+                'range': f'B{next_row}',
+                'values': [[f'=D{next_row}']]
+            },
+            {
+                'range': f'C{next_row}',
+                'values': [[name]]
+            },
+            {
+                'range': f'D{next_row}',
+                'values': [[main_formula]]
+            }
+        ]
+        
+        # 執行批量更新
+        stock_names_sheet.batch_update(batch_data)
+        
+        logger.info(f"已將股票 {code}.TW {name} 添加到 stock_names 工作表，行號: {next_row}")
         return True
     except Exception as e:
-        logger.error(f"添加股票到 stock_names 工作表时出错: {e}")
+        logger.error(f"添加股票到 stock_names 工作表時出錯: {e}")
         return False
         
 # 初始化 Google Sheets 並啟動定期更新
